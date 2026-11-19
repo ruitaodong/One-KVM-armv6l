@@ -34,15 +34,21 @@ step() { printf '\n==> %s\n' "$*"; }
 if ! docker image inspect "$BASE" >/dev/null 2>&1; then
     step "Creating Raspberry Pi OS ($SUITE, armhf) base image"
     command -v mmdebstrap >/dev/null || sudo apt-get install -y mmdebstrap
-    KEY=$(mktemp)
+    # apt verifies as its unprivileged _apt user and only reads keyrings named
+    # *.gpg/*.asc, so the key file needs that extension and must be world-readable
+    KEY=$(mktemp --suffix=.gpg)
     curl -fsSL https://archive.raspbian.org/raspbian.public.key | gpg --dearmor > "$KEY"
+    chmod 644 "$KEY"
+    # Write to a file first: piping straight into docker import could leave a
+    # broken image behind after a failure, which later runs would then reuse
+    TAR=$(mktemp --suffix=.tar)
     sudo mmdebstrap --variant=apt --architectures=armhf --keyring="$KEY" \
         --include="build-essential pkg-config cmake git curl ca-certificates xz-utils util-linux \
                    clang libclang-dev libasound2-dev libudev-dev libv4l-dev libdrm-dev \
                    libavcodec-dev libavutil-dev libopus-dev zlib1g-dev" \
-        "$SUITE" - "deb http://raspbian.raspberrypi.com/raspbian $SUITE main" \
-        | docker import - "$BASE"
-    rm -f "$KEY"
+        "$SUITE" "$TAR" "deb http://raspbian.raspberrypi.com/raspbian $SUITE main"
+    docker import "$TAR" "$BASE"
+    sudo rm -f "$TAR" "$KEY"
 fi
 
 # 2. Frontend (embedded into the binary from web/dist)
