@@ -1,13 +1,18 @@
 #!/usr/bin/env bash
 # Build One-KVM for ARMv6 (Raspberry Pi Zero / Zero W / Pi 1).
 #
-# Compiles natively inside a Raspberry Pi OS armhf container, so the host must
-# be arm64 Linux whose CPU can run 32-bit ARM code: Oracle Cloud Ampere A1,
-# a Pi 4/400 with a 64-bit OS, GitHub arm64 runners (if supported). Check:
+# No cross-compiling: a linux/arm/v6 container (Raspberry Pi OS armhf) runs
+# directly on an arm64 host whose CPU executes 32-bit ARM code (Oracle Cloud
+# Ampere A1, a Pi 4/400 with a 64-bit OS, GitHub arm64 runners) and builds
+# One-KVM there with its own native gcc and rustc, as on a Pi. Check the host:
 #   docker run --rm --platform linux/arm/v7 debian:trixie linux32 uname -m   -> armv8l
 # Needs Docker, and sudo once per suite (mmdebstrap creates the base image).
 #
-# Output: dist/one-kvm_<version>_armhf-armv6-<suite>.deb and the bare binary.
+# Usage: scripts/build-armv6.sh [build|image|shell]
+#   build  (default) build images if needed, compile, package the .deb
+#   image  only create/update the reusable images onekvm-raspbian:<suite>
+#          (Raspberry Pi OS armhf) and onekvm-armv6:<suite> (+ Rust, libs)
+#   shell  interactive shell in the build container, repo mounted at /src
 #
 #   SUITE=trixie|bookworm  Raspberry Pi OS release on the Pi (default trixie)
 #   JOBS=N                 limit parallel compile jobs
@@ -16,6 +21,7 @@
 set -euo pipefail
 cd "$(dirname "$0")/.."
 ROOT=$PWD
+MODE=${1:-build}
 
 SUITE=${SUITE:-trixie}
 case "$SUITE" in
@@ -25,13 +31,16 @@ case "$SUITE" in
 esac
 BASE=onekvm-raspbian:$SUITE
 IMAGE=onekvm-armv6:$SUITE
+PLATFORM=linux/arm/v6   # what the images are; they run natively, no QEMU
 OUT_DIR=${OUT_DIR:-$ROOT/dist}
 CACHE=${CACHE:-$HOME/.cache/onekvm-armv6/$SUITE}
+OWNER="$(id -u):$(id -g)"
 mkdir -p "$OUT_DIR" "$CACHE/registry" "$CACHE/git" "$CACHE/target"
 step() { printf '\n==> %s\n' "$*"; }
 
-# 1. Raspberry Pi OS armhf base image with all build dependencies (once per suite)
-if ! docker image inspect "$BASE" >/dev/null 2>&1; then
+# Raspberry Pi OS armhf base image with all build dependencies (once per suite)
+base_image() {
+    docker image inspect "$BASE" >/dev/null 2>&1 && return
     step "Creating Raspberry Pi OS ($SUITE, armhf) base image"
     command -v mmdebstrap >/dev/null || sudo apt-get install -y mmdebstrap
     # Raspbian archive key at a standard, world-readable path (apt checks
@@ -54,34 +63,67 @@ if ! docker image inspect "$BASE" >/dev/null 2>&1; then
                    clang libclang-dev libasound2-dev libudev-dev libv4l-dev libdrm-dev \
                    libavcodec-dev libavutil-dev libopus-dev zlib1g-dev" \
         "$SUITE" "$TAR" "deb [signed-by=$KEYRING] http://raspbian.raspberrypi.com/raspbian $SUITE main"
-    docker import "$TAR" "$BASE"
+    docker import --platform "$PLATFORM" "$TAR" "$BASE"
     sudo rm -rf "$TMP"
-fi
+}
 
-# 2. Frontend (embedded into the binary from web/dist)
-step "Building web frontend"
-docker run --rm -v "$ROOT/web":/web -w /web node:24-bookworm-slim sh -euc "
-    npm ci --no-audit --no-fund && npm run build
-    chown -R $(id -u):$(id -g) /web/dist /web/node_modules"
+# Rust + libjpeg-turbo + libyuv on top (Docker caches the layers)
+toolchain_image() {
+    base_image
+    step "Building toolchain image $IMAGE"
+    docker build --platform "$PLATFORM" -f build/cross/Dockerfile.armv6 \
+        --build-arg BASE="$BASE" --build-arg TIME_BITS="$TIME_BITS" -t "$IMAGE" build/cross
+}
 
-# 3. Rust + libjpeg-turbo + libyuv on top (cached by Docker after the first time)
-step "Building toolchain image $IMAGE"
-docker build -f build/cross/Dockerfile.armv6 \
-    --build-arg BASE="$BASE" --build-arg TIME_BITS="$TIME_BITS" -t "$IMAGE" build/cross
+# Frontend (embedded into the binary from web/dist)
+web() {
+    step "Building web frontend"
+    docker run --rm -v "$ROOT/web":/web -w /web node:24-bookworm-slim sh -euc "
+        npm ci --no-audit --no-fund && npm run build
+        chown -R $OWNER /web/dist /web/node_modules"
+}
 
-# 4. Compile, check, package
-step "Compiling and packaging"
-docker run --rm \
-    -v "$ROOT":/src \
-    -v "$CACHE/target":/src/target \
-    -v "$CACHE/registry":/root/.cargo/registry \
-    -v "$CACHE/git":/root/.cargo/git \
-    -v "$OUT_DIR":/out \
-    -e SUITE="$SUITE" -e OWNER="$(id -u):$(id -g)" ${JOBS:+-e CARGO_BUILD_JOBS="$JOBS"} \
-    "$IMAGE" bash -euo pipefail -c '
+# docker run with the repo, caches and output mounted
+in_container() {
+    docker run --rm --platform "$PLATFORM" "$@" \
+        -v "$ROOT":/src \
+        -v "$CACHE/target":/src/target \
+        -v "$CACHE/registry":/root/.cargo/registry \
+        -v "$CACHE/git":/root/.cargo/git \
+        -v "$OUT_DIR":/out \
+        -e SUITE="$SUITE" -e OWNER="$OWNER" ${JOBS:+-e CARGO_BUILD_JOBS="$JOBS"} \
+        "$IMAGE" bash -euo pipefail -c "$CMD"
+}
+FIX_OWNER='chown -R "$OWNER" /out /src/target /root/.cargo/registry /root/.cargo/git 2>/dev/null || true'
+
+case "$MODE" in
+image)
+    toolchain_image
+    step "Toolchain check"
+    docker image inspect --format 'image platform: {{.Os}}/{{.Architecture}}/{{.Variant}}' "$IMAGE"
+    docker run --rm --platform "$PLATFORM" "$IMAGE" bash -c '
+        # a 64-bit kernel reports 32-bit processes as armv8l; the code is ARMv6
+        echo "uname -m: $(uname -m)   gcc: $(gcc -dumpmachine)"
+        gcc -Q --help=target | grep -E "^ +-m(arch|fpu|float-abi)=" | tr -s " "
+        rustc -vV | grep -E "^(release|host)"'
+    docker image ls --filter reference='onekvm-*'
+    ;;
+shell)
+    toolchain_image
+    [ -f web/dist/index.html ] || web
+    step "Shell in $IMAGE (repo at /src). Build with: cargo build --release"
+    CMD="bash || true; $FIX_OWNER" in_container -it
+    ;;
+build)
+    toolchain_image
+    web
+    step "Compiling and packaging"
+    CMD='
+        # Plain native build: rustc and gcc in this container are ARMv6 already
+        cargo build --release
+        BIN=target/release/one-kvm
         T=arm-unknown-linux-gnueabihf
-        cargo build --release --target $T
-        BIN=target/$T/release/one-kvm
+        mkdir -p target/$T/release && cp "$BIN" target/$T/release/   # where package-deb.sh looks
 
         # Informational: runtime-detected NEON code (e.g. in crypto libraries)
         # can mark the binary v7/NEON even though it never runs on a Pi Zero.
@@ -94,9 +136,10 @@ docker run --rm \
         OUTPUT_DIR=/out EXTRA_DEPS="$FF_DEPS" DEB_NAME_SUFFIX="-armv6-$SUITE" \
             bash build/package-deb.sh $T
         cp "$BIN" "/out/one-kvm-armv6-$SUITE"
-
-        # Hand everything back to the calling user
-        chown -R "$OWNER" /out /src/target /root/.cargo/registry /root/.cargo/git'
-
-step "Done"
-ls -la "$OUT_DIR"
+        '"$FIX_OWNER" in_container
+    step "Done"
+    ls -la "$OUT_DIR"
+    ;;
+*)
+    echo "usage: $0 [build|image|shell]" >&2; exit 1 ;;
+esac

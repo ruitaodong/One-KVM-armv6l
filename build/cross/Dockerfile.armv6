@@ -1,10 +1,11 @@
 # ARMv6 build environment (Raspberry Pi Zero / Zero W / Pi 1)
 #
-# A plain Raspberry Pi OS armhf system with Rust, run NATIVELY on an arm64
-# host that can execute 32-bit ARM code (Oracle Cloud Ampere A1, Pi 4/400 on a
-# 64-bit OS, GitHub arm64 runners if their CPU supports it). No cross
-# compiler, no sysroot, no QEMU: Raspberry Pi OS's gcc already targets ARMv6,
-# and FFmpeg, ALSA, udev etc. come from its own -dev packages.
+# A linux/arm/v6 image: plain Raspberry Pi OS armhf with Rust, run NATIVELY on
+# an arm64 host that can execute 32-bit ARM code (Oracle Cloud Ampere A1, Pi
+# 4/400 on a 64-bit OS, GitHub arm64 runners). Everything builds natively, as
+# on a Pi: no cross compiler, no sysroot, no QEMU. Raspberry Pi OS's gcc and
+# the ARMv6 rustc produce ARMv6 code by default, and FFmpeg, ALSA, udev etc.
+# come from Raspberry Pi OS's own -dev packages.
 #
 # BASE is created by scripts/build-armv6.sh (mmdebstrap | docker import).
 
@@ -30,12 +31,18 @@ ENV LANG=C.UTF-8 \
     BINDGEN_EXTRA_CLANG_ARGS="-D_FILE_OFFSET_BITS=64 -D_TIME_BITS=${TIME_BITS}" \
     RUST_LIBC_UNSTABLE_GNU_TIME_BITS=${TIME_BITS}
 
-# Rust with an ARMv6 host toolchain, so the default target is already right
-RUN curl -fsSL -o /tmp/rustup-init \
+# Rust with an ARMv6 host toolchain, so the default target is already right.
+# RUSTUP_USE_CURL: download with libcurl (rustup's built-in client stalled at
+# "syncing channel updates" on GitHub's arm64 runner); -v logs each download
+# (no progress bars without a terminal); timeout fails the step instead of
+# hanging until the job limit.
+RUN curl -fsSL --retry 3 -o /tmp/rustup-init \
         https://static.rust-lang.org/rustup/dist/arm-unknown-linux-gnueabihf/rustup-init \
     && chmod +x /tmp/rustup-init \
-    && /tmp/rustup-init -y --profile minimal --default-host arm-unknown-linux-gnueabihf \
-    && rm /tmp/rustup-init
+    && RUSTUP_USE_CURL=1 timeout 20m /tmp/rustup-init -y -v --profile minimal \
+        --default-host arm-unknown-linux-gnueabihf \
+    && rm /tmp/rustup-init \
+    && rustc --version && cargo --version
 
 # libjpeg-turbo 3.x (One-KVM needs the TurboJPEG 3 API; Debian has 2.1).
 # No SIMD: its 32-bit ARM SIMD code is NEON, which ARMv6 doesn't have.

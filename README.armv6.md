@@ -1,8 +1,9 @@
 # One-KVM for ARMv6 (Raspberry Pi Zero / Zero W / Pi 1)
 
 Upstream's armhf packages are ARMv7 and crash on the Zero/Zero W with
-`Illegal instruction`. This fork builds a real ARMv6 package the simple way:
-**natively, inside a Raspberry Pi OS armhf container**. Raspberry Pi OS's
+`Illegal instruction`. This fork builds a real ARMv6 package the simple way, with **no
+cross-compiling**: a `linux/arm/v6` Raspberry Pi OS container runs directly on
+an arm64 host and compiles One-KVM natively, exactly as on a Pi. Raspberry Pi OS's
 compiler already targets ARMv6, and FFmpeg, ALSA, udev etc. come from its own
 packages. Only libjpeg-turbo 3 and libyuv are built from source.
 
@@ -34,6 +35,28 @@ Result: `dist/one-kvm_<version>_armhf-armv6-<suite>.deb`. The first run creates
 the Raspberry Pi OS base image (uses `sudo` for `mmdebstrap`); later runs reuse
 it and the Rust build cache in `~/.cache/onekvm-armv6/`.
 
+### Reusable build environment
+
+The build environment is two local Docker images, created once and reused by
+every later build:
+
+- `onekvm-raspbian:<suite>`: Raspberry Pi OS armhf with compilers and -dev packages
+- `onekvm-armv6:<suite>`: the above + Rust (ARMv6 host), libjpeg-turbo 3, libyuv
+
+```sh
+./scripts/build-armv6.sh image    # create/update the images and print a toolchain check
+./scripts/build-armv6.sh          # build the .deb in them (default "build")
+./scripts/build-armv6.sh shell    # shell in the container, repo at /src
+```
+
+In the shell, `cargo build --release` works directly (the result is
+`target/release/one-kvm`); caches are shared with `build`, and file ownership is handed
+back to you on exit. To recreate an image from scratch:
+`docker rmi onekvm-armv6:trixie onekvm-raspbian:trixie`.
+
+Keep or move the images with `docker save onekvm-armv6:trixie | gzip > onekvm-armv6-trixie.tar.gz`
+and `docker load < onekvm-armv6-trixie.tar.gz`.
+
 ### GitHub Actions
 
 Actions → **Build ARMv6 (Pi Zero / Zero W)** → Run workflow, pick the suite and
@@ -50,8 +73,10 @@ with a clear error if not. Download the `one-kvm-armv6-<suite>` artifact.
    sudo apt update && sudo apt install -y docker.io git tmux
    sudo usermod -aG docker "$USER" && newgrp docker
    git clone https://github.com/ruitaodong/One-KVM-armv6l && cd One-KVM-armv6l
+   ./scripts/build-armv6.sh image       # once: build environment (~15-30 min)
    tmux new -s build './scripts/build-armv6.sh 2>&1 | tee build.log'
    ```
+   Later builds reuse the images: `git pull && ./scripts/build-armv6.sh`.
 3. Optional, as a GitHub runner: Settings → Actions → Runners → *New
    self-hosted runner* (Linux, ARM64), run the commands shown on the VM, then
    run the workflow with `runner: self-hosted`. Only on a repository whose
