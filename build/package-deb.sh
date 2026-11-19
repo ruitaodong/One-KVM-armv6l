@@ -17,7 +17,7 @@ if [ -z "$VERSION" ]; then
     exit 1
 fi
 
-OUTPUT_DIR="$PROJECT_DIR/target/debian"
+OUTPUT_DIR="${OUTPUT_DIR:-$PROJECT_DIR/target/debian}"
 mkdir -p "$OUTPUT_DIR"
 
 # Supported architectures
@@ -25,6 +25,10 @@ TARGETS=(
     "x86_64-unknown-linux-gnu:amd64"
     "aarch64-unknown-linux-gnu:arm64"
     "armv7-unknown-linux-gnueabihf:armhf"
+)
+# Only packaged when named explicitly (not part of "package all")
+EXPLICIT_TARGETS=(
+    "arm-unknown-linux-gnueabihf:armhf"   # ARMv6: Pi Zero / Zero W / Pi 1 (scripts/build-armv6.sh)
 )
 
 # Package single architecture
@@ -44,7 +48,8 @@ package_arch() {
     fi
 
     local PKG_DIR="/tmp/one-kvm-pkg-$$"
-    local DEB_PATH="$OUTPUT_DIR/one-kvm_${VERSION}_${DEB_ARCH}.deb"
+    # DEB_NAME_SUFFIX tells otherwise identical armhf packages apart (e.g. -armv6-trixie)
+    local DEB_PATH="$OUTPUT_DIR/one-kvm_${VERSION}_${DEB_ARCH}${DEB_NAME_SUFFIX:-}.deb"
 
     # Create package structure
     mkdir -p "$PKG_DIR/DEBIAN"
@@ -132,6 +137,10 @@ EOF
     if [ "$DEB_ARCH" = "amd64" ]; then
         DEPS="$DEPS, $AMD64_DEPS"
     fi
+    # EXTRA_DEPS: e.g. the distro FFmpeg libraries an ARMv6 build links dynamically
+    if [ -n "${EXTRA_DEPS:-}" ]; then
+        DEPS="$DEPS, $EXTRA_DEPS"
+    fi
 
     cat > "$PKG_DIR/DEBIAN/control" <<EOF
 Package: one-kvm
@@ -166,6 +175,17 @@ if [ -n "$1" ]; then
             break
         fi
     done
+
+    if [ $FOUND -eq 0 ]; then
+        for target in "${EXPLICIT_TARGETS[@]}"; do
+            IFS=':' read -r RUST_TARGET DEB_ARCH <<< "$target"
+            if [[ "$1" == "$RUST_TARGET" ]]; then
+                package_arch "$RUST_TARGET" "$DEB_ARCH"
+                FOUND=1
+                break
+            fi
+        done
+    fi
 
     if [ $FOUND -eq 0 ]; then
         echo "Error: Unknown architecture: $1"

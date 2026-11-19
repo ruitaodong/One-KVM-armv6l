@@ -19,6 +19,7 @@ enum AVPixelFormat {
   AV_PIX_FMT_YUV422P = 4,     // planar YUV 4:2:2
   AV_PIX_FMT_YUVJ420P = 12,   // JPEG full-range YUV420P (same layout as YUV420P)
   AV_PIX_FMT_YUVJ422P = 13,   // JPEG full-range YUV422P (same layout as YUV422P)
+  AV_PIX_FMT_UYVY422 = 15,    // packed YUV 4:2:2, U Y0 V Y1 (TC358743 CSI output)
   AV_PIX_FMT_NV12 = 23,
   AV_PIX_FMT_NV21 = 24,
   AV_PIX_FMT_NV16 = 101,

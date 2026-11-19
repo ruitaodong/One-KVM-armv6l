@@ -1,0 +1,50 @@
+name: Build ARMv6 (Pi Zero / Zero W)
+
+# Runs scripts/build-armv6.sh, which compiles natively in a Raspberry Pi OS
+# armhf container. Needs an arm64 runner whose CPU can run 32-bit ARM code.
+on:
+  workflow_dispatch:
+    inputs:
+      suite:
+        description: Raspberry Pi OS release on the Pi (must match)
+        type: choice
+        options: [trixie, bookworm]
+        default: trixie
+      runner:
+        description: "ubuntu-24.04-arm (GitHub) or self-hosted (e.g. an OCI Ampere A1 VM)"
+        type: choice
+        options: [ubuntu-24.04-arm, self-hosted]
+        default: ubuntu-24.04-arm
+
+permissions:
+  contents: read
+
+jobs:
+  armv6:
+    runs-on: ${{ inputs.runner }}
+    timeout-minutes: 360
+    env:
+      SUITE: ${{ inputs.suite }}
+      CACHE: ${{ github.workspace }}/../armv6-cache
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check the runner can run 32-bit ARM natively
+        run: |
+          r=$(docker run --rm --platform linux/arm/v7 debian:trixie linux32 uname -m)
+          echo "32-bit ARM test: $r"
+          [ "$r" = armv8l ] || { echo "::error::This runner can't run 32-bit ARM code natively (got '$r')"; exit 1; }
+
+      - uses: actions/cache@v4
+        with:
+          path: ${{ env.CACHE }}
+          key: armv6-${{ inputs.suite }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: armv6-${{ inputs.suite }}-
+
+      - run: ./scripts/build-armv6.sh
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: one-kvm-armv6-${{ inputs.suite }}
+          path: dist/
+          if-no-files-found: error

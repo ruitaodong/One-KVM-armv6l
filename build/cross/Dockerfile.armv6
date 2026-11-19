@@ -1,0 +1,70 @@
+# ARMv6 build environment (Raspberry Pi Zero / Zero W / Pi 1)
+#
+# A plain Raspberry Pi OS armhf system with Rust, run NATIVELY on an arm64
+# host that can execute 32-bit ARM code (Oracle Cloud Ampere A1, Pi 4/400 on a
+# 64-bit OS, GitHub arm64 runners if their CPU supports it). No cross
+# compiler, no sysroot, no QEMU: Raspberry Pi OS's gcc already targets ARMv6,
+# and FFmpeg, ALSA, udev etc. come from its own -dev packages.
+#
+# BASE is created by scripts/build-armv6.sh (mmdebstrap | docker import).
+
+ARG BASE=onekvm-raspbian:trixie
+FROM ${BASE}
+
+# 64 on trixie (Raspberry Pi OS 13 armhf uses 64-bit time_t), 32 on bookworm
+ARG TIME_BITS=64
+ARG LIBJPEG_TURBO_VERSION=3.1.4.1
+ARG LIBYUV_REV=957f295ea946cbbd13fcfc46e7066f2efa801233
+
+# On a 64-bit kernel uname reports "aarch64" even to 32-bit programs, which
+# misleads cmake/configure. linux32 makes it report a 32-bit ARM machine.
+SHELL ["linux32", "/bin/bash", "-euo", "pipefail", "-c"]
+ENTRYPOINT ["linux32"]
+
+# Match the distro's time_t/off_t ABI in everything compiled here (C, C++,
+# bindgen and Rust's libc crate)
+ENV LANG=C.UTF-8 \
+    PATH=/root/.cargo/bin:$PATH \
+    CFLAGS="-D_FILE_OFFSET_BITS=64 -D_TIME_BITS=${TIME_BITS}" \
+    CXXFLAGS="-D_FILE_OFFSET_BITS=64 -D_TIME_BITS=${TIME_BITS}" \
+    BINDGEN_EXTRA_CLANG_ARGS="-D_FILE_OFFSET_BITS=64 -D_TIME_BITS=${TIME_BITS}" \
+    RUST_LIBC_UNSTABLE_GNU_TIME_BITS=${TIME_BITS}
+
+# Rust with an ARMv6 host toolchain, so the default target is already right
+RUN curl -fsSL -o /tmp/rustup-init \
+        https://static.rust-lang.org/rustup/dist/arm-unknown-linux-gnueabihf/rustup-init \
+    && chmod +x /tmp/rustup-init \
+    && /tmp/rustup-init -y --profile minimal --default-host arm-unknown-linux-gnueabihf \
+    && rm /tmp/rustup-init
+
+# libjpeg-turbo 3.x (One-KVM needs the TurboJPEG 3 API; Debian has 2.1).
+# No SIMD: its 32-bit ARM SIMD code is NEON, which ARMv6 doesn't have.
+RUN git clone --depth 1 --branch ${LIBJPEG_TURBO_VERSION} https://github.com/libjpeg-turbo/libjpeg-turbo.git /tmp/jpeg \
+    && cmake -S /tmp/jpeg -B /tmp/jpeg/build -DCMAKE_BUILD_TYPE=Release \
+        -DCMAKE_INSTALL_PREFIX=/usr/local -DCMAKE_INSTALL_LIBDIR=lib \
+        -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+        -DENABLE_SHARED=OFF -DENABLE_STATIC=ON -DWITH_SIMD=OFF \
+    && make -C /tmp/jpeg/build -j"$(nproc)" install \
+    && rm -rf /tmp/jpeg
+
+# libyuv at the revision upstream One-KVM uses (NEON paths compiled out)
+RUN git init -q /tmp/yuv && cd /tmp/yuv \
+    && git fetch -q --depth 1 https://github.com/lemenkov/libyuv ${LIBYUV_REV} && git checkout -q FETCH_HEAD \
+    && cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local \
+        -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
+        -DJPEG_INCLUDE_DIR=/usr/local/include -DJPEG_LIBRARY=/usr/local/lib/libjpeg.a \
+        -DCMAKE_C_FLAGS="$CFLAGS -DHAVE_JPEG -DLIBYUV_DISABLE_NEON" \
+        -DCMAKE_CXX_FLAGS="$CXXFLAGS -DHAVE_JPEG -DLIBYUV_DISABLE_NEON" \
+    && make -C build -j"$(nproc)" install \
+    && rm -rf /tmp/yuv
+
+# ONE_KVM_LIBS_PATH: libyuv is found here. It has no libavcodec.a, so hwcodec
+# falls back to pkg-config and links Raspberry Pi OS's shared FFmpeg.
+# Thin LTO: rustc is a 32-bit program here (max 4 GB address space), and
+# One-KVM's default full LTO with one codegen unit may not fit.
+ENV ONE_KVM_LIBS_PATH=/usr/local \
+    LIBYUV_STATIC=1 \
+    CARGO_PROFILE_RELEASE_LTO=thin
+
+WORKDIR /src
+CMD ["bash"]

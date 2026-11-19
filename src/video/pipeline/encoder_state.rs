@@ -525,7 +525,7 @@ pub(super) fn build_encoder_state(
             PixelFormat::Nv12 | PixelFormat::Nv16 | PixelFormat::Nv21 | PixelFormat::Yuv420
         )
     } else {
-        false
+        pi_v4l2m2m_uyvy_direct(codec_name, pipeline_input_format)
     };
     let needs_yuv420p = if codec_name.contains("libx264") {
         !matches!(
@@ -607,9 +607,44 @@ fn h264_direct_input_format(
             PixelFormat::Yuv420 => Some(H264InputFormat::Yuv420p),
             _ => None,
         }
+    } else if pi_v4l2m2m_uyvy_direct(codec_name, input_format) {
+        Some(H264InputFormat::Uyvy422)
     } else {
         None
     }
+}
+
+/// UYVY frames (HDMI-CSI bridges such as the TC358743) can go straight into the
+/// Raspberry Pi's V4L2 M2M H.264 encoder (bcm2835-codec), which accepts packed
+/// 4:2:2 input natively, instead of being converted to NV12 in software first.
+///
+/// Limited to H.264 on the Pi's encoder: other V4L2 M2M encoders (Amlogic,
+/// Qualcomm) aren't known to accept UYVY, so they keep the converting path.
+/// Set ONE_KVM_PI_UYVY_DIRECT=0 to disable.
+fn pi_v4l2m2m_uyvy_direct(codec_name: &str, input_format: PixelFormat) -> bool {
+    codec_name.contains("h264_v4l2m2m")
+        && matches!(input_format, PixelFormat::Uyvy)
+        && std::env::var("ONE_KVM_PI_UYVY_DIRECT").map_or(true, |v| v != "0")
+        && bcm2835_codec_present()
+}
+
+fn bcm2835_codec_present() -> bool {
+    static PRESENT: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *PRESENT.get_or_init(|| {
+        let present = std::fs::read_dir("/sys/class/video4linux")
+            .map(|entries| {
+                entries.flatten().any(|entry| {
+                    std::fs::read_to_string(entry.path().join("name"))
+                        .map(|name| name.trim().starts_with("bcm2835-codec"))
+                        .unwrap_or(false)
+                })
+            })
+            .unwrap_or(false);
+        if present {
+            info!("bcm2835-codec found: UYVY input goes directly to h264_v4l2m2m");
+        }
+        present
+    })
 }
 
 fn h265_direct_input_format(

@@ -101,6 +101,9 @@ pub enum H264InputFormat {
     Nv24,
     /// YUYV422 - packed YUV 4:2:2 format (optimal for RKMPP direct input)
     Yuyv422,
+    /// UYVY422 - packed YUV 4:2:2, U Y0 V Y1 byte order. What HDMI-CSI bridges
+    /// (TC358743) deliver; the Raspberry Pi V4L2 M2M encoder takes it directly.
+    Uyvy422,
     /// RGB24 - packed RGB format (RKMPP direct input)
     Rgb24,
     /// BGR24 - packed BGR format (RKMPP direct input)
@@ -279,6 +282,7 @@ impl H264Encoder {
             H264InputFormat::Nv24 => ("nv24", AVPixelFormat::AV_PIX_FMT_NV24),
             H264InputFormat::Yuv420p => ("yuv420p", AVPixelFormat::AV_PIX_FMT_YUV420P),
             H264InputFormat::Yuyv422 => ("yuyv422", AVPixelFormat::AV_PIX_FMT_YUYV422),
+            H264InputFormat::Uyvy422 => ("uyvy422", AVPixelFormat::AV_PIX_FMT_UYVY422),
             H264InputFormat::Rgb24 => ("rgb24", AVPixelFormat::AV_PIX_FMT_RGB24),
             H264InputFormat::Bgr24 => ("bgr24", AVPixelFormat::AV_PIX_FMT_BGR24),
         };
@@ -506,6 +510,7 @@ impl Encoder for H264Encoder {
             H264InputFormat::Nv24 => matches!(format, PixelFormat::Nv24),
             H264InputFormat::Yuv420p => matches!(format, PixelFormat::Yuv420),
             H264InputFormat::Yuyv422 => matches!(format, PixelFormat::Yuyv),
+            H264InputFormat::Uyvy422 => matches!(format, PixelFormat::Uyvy),
             H264InputFormat::Rgb24 => matches!(format, PixelFormat::Rgb24),
             H264InputFormat::Bgr24 => matches!(format, PixelFormat::Bgr24),
         }
