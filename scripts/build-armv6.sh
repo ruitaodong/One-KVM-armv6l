@@ -34,21 +34,28 @@ step() { printf '\n==> %s\n' "$*"; }
 if ! docker image inspect "$BASE" >/dev/null 2>&1; then
     step "Creating Raspberry Pi OS ($SUITE, armhf) base image"
     command -v mmdebstrap >/dev/null || sudo apt-get install -y mmdebstrap
-    # apt verifies as its unprivileged _apt user and only reads keyrings named
-    # *.gpg/*.asc, so the key file needs that extension and must be world-readable
-    KEY=$(mktemp --suffix=.gpg)
-    curl -fsSL https://archive.raspbian.org/raspbian.public.key | gpg --dearmor > "$KEY"
-    chmod 644 "$KEY"
+    # Raspbian archive key at a standard, world-readable path (apt checks
+    # signatures as its unprivileged _apt user), used via signed-by as
+    # mmdebstrap's docs recommend. It is also copied into the image.
+    KEYRING=/usr/share/keyrings/raspbian-archive-keyring.gpg
+    if [ ! -s "$KEYRING" ]; then
+        curl -fsSL https://archive.raspbian.org/raspbian.public.key | gpg --dearmor \
+            | sudo tee "$KEYRING" >/dev/null
+        sudo chmod 644 "$KEYRING"
+    fi
+    gpg --show-keys --with-colons "$KEYRING" | grep -q 9165938D90FDDD2E \
+        || { echo "Raspbian key 9165938D90FDDD2E not found in $KEYRING" >&2; sudo rm -f "$KEYRING"; exit 1; }
     # Write to a file first: piping straight into docker import could leave a
     # broken image behind after a failure, which later runs would then reuse
-    TAR=$(mktemp --suffix=.tar)
-    sudo mmdebstrap --variant=apt --architectures=armhf --keyring="$KEY" \
+    TMP=$(mktemp -d); TAR=$TMP/base.tar
+    sudo mmdebstrap --variant=apt --architectures=armhf \
+        --setup-hook="mkdir -p \"\$1/usr/share/keyrings\" && cp $KEYRING \"\$1/usr/share/keyrings/\"" \
         --include="build-essential pkg-config cmake git curl ca-certificates xz-utils util-linux \
                    clang libclang-dev libasound2-dev libudev-dev libv4l-dev libdrm-dev \
                    libavcodec-dev libavutil-dev libopus-dev zlib1g-dev" \
-        "$SUITE" "$TAR" "deb http://raspbian.raspberrypi.com/raspbian $SUITE main"
+        "$SUITE" "$TAR" "deb [signed-by=$KEYRING] http://raspbian.raspberrypi.com/raspbian $SUITE main"
     docker import "$TAR" "$BASE"
-    sudo rm -f "$TAR" "$KEY"
+    sudo rm -rf "$TMP"
 fi
 
 # 2. Frontend (embedded into the binary from web/dist)
