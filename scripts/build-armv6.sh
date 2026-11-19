@@ -6,12 +6,11 @@
 # Ampere A1, a Pi 4/400 with a 64-bit OS, GitHub arm64 runners) and builds
 # One-KVM there with its own native gcc and rustc, as on a Pi. Check the host:
 #   docker run --rm --platform linux/arm/v7 debian:trixie linux32 uname -m   -> armv8l
-# Needs Docker, and sudo once per suite (mmdebstrap creates the base image).
+# Needs only Docker. The build environment is build/cross/Dockerfile.armv6.
 #
 # Usage: scripts/build-armv6.sh [build|image|shell]
-#   build  (default) build images if needed, compile, package the .deb
-#   image  only create/update the reusable images onekvm-raspbian:<suite>
-#          (Raspberry Pi OS armhf) and onekvm-armv6:<suite> (+ Rust, libs)
+#   build  (default) build the image if needed, compile, package the .deb
+#   image  only build/update the reusable build environment onekvm-armv6:<suite>
 #   shell  interactive shell in the build container, repo mounted at /src
 #
 #   SUITE=trixie|bookworm  Raspberry Pi OS release on the Pi (default trixie)
@@ -29,50 +28,19 @@ case "$SUITE" in
     bookworm) TIME_BITS=32 ;;
     *) echo "SUITE must be trixie or bookworm" >&2; exit 1 ;;
 esac
-BASE=onekvm-raspbian:$SUITE
 IMAGE=onekvm-armv6:$SUITE
-PLATFORM=linux/arm/v6   # what the images are; they run natively, no QEMU
+PLATFORM=linux/arm/v6   # what the image is; it runs natively, no QEMU
 OUT_DIR=${OUT_DIR:-$ROOT/dist}
 CACHE=${CACHE:-$HOME/.cache/onekvm-armv6/$SUITE}
 OWNER="$(id -u):$(id -g)"
 mkdir -p "$OUT_DIR" "$CACHE/registry" "$CACHE/git" "$CACHE/target"
 step() { printf '\n==> %s\n' "$*"; }
 
-# Raspberry Pi OS armhf base image with all build dependencies (once per suite)
-base_image() {
-    docker image inspect "$BASE" >/dev/null 2>&1 && return
-    step "Creating Raspberry Pi OS ($SUITE, armhf) base image"
-    command -v mmdebstrap >/dev/null || sudo apt-get install -y mmdebstrap
-    # Raspbian archive key at a standard, world-readable path (apt checks
-    # signatures as its unprivileged _apt user), used via signed-by as
-    # mmdebstrap's docs recommend. It is also copied into the image.
-    KEYRING=/usr/share/keyrings/raspbian-archive-keyring.gpg
-    if [ ! -s "$KEYRING" ]; then
-        curl -fsSL https://archive.raspbian.org/raspbian.public.key | gpg --dearmor \
-            | sudo tee "$KEYRING" >/dev/null
-        sudo chmod 644 "$KEYRING"
-    fi
-    gpg --show-keys --with-colons "$KEYRING" | grep -q 9165938D90FDDD2E \
-        || { echo "Raspbian key 9165938D90FDDD2E not found in $KEYRING" >&2; sudo rm -f "$KEYRING"; exit 1; }
-    # Write to a file first: piping straight into docker import could leave a
-    # broken image behind after a failure, which later runs would then reuse
-    TMP=$(mktemp -d); TAR=$TMP/base.tar
-    sudo mmdebstrap --variant=apt --architectures=armhf \
-        --setup-hook="mkdir -p \"\$1/usr/share/keyrings\" && cp $KEYRING \"\$1/usr/share/keyrings/\"" \
-        --include="build-essential pkg-config cmake git curl ca-certificates xz-utils util-linux \
-                   clang libclang-dev libasound2-dev libudev-dev libv4l-dev libdrm-dev \
-                   libavcodec-dev libavutil-dev libopus-dev zlib1g-dev" \
-        "$SUITE" "$TAR" "deb [signed-by=$KEYRING] http://raspbian.raspberrypi.com/raspbian $SUITE main"
-    docker import --platform "$PLATFORM" "$TAR" "$BASE"
-    sudo rm -rf "$TMP"
-}
-
-# Rust + libjpeg-turbo + libyuv on top (Docker caches the layers)
+# The build environment: build/cross/Dockerfile.armv6 (Docker caches the layers)
 toolchain_image() {
-    base_image
-    step "Building toolchain image $IMAGE"
+    step "Building build environment $IMAGE"
     docker build --platform "$PLATFORM" -f build/cross/Dockerfile.armv6 \
-        --build-arg BASE="$BASE" --build-arg TIME_BITS="$TIME_BITS" -t "$IMAGE" build/cross
+        --build-arg SUITE="$SUITE" --build-arg TIME_BITS="$TIME_BITS" -t "$IMAGE" build/cross
 }
 
 # Frontend (embedded into the binary from web/dist)
@@ -106,7 +74,7 @@ image)
         echo "uname -m: $(uname -m)   gcc: $(gcc -dumpmachine)"
         gcc -Q --help=target | grep -E "^ +-m(arch|fpu|float-abi)=" | tr -s " "
         rustc -vV | grep -E "^(release|host)"'
-    docker image ls --filter reference='onekvm-*'
+    docker image ls onekvm-armv6
     ;;
 shell)
     toolchain_image

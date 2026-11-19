@@ -42,3 +42,7 @@ CLAUDE.md
 secrets.toml
 .env
 /docs/
+
+# macOS metadata files
+._*
+.DS_Store

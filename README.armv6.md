@@ -31,31 +31,36 @@ git clone https://github.com/ruitaodong/One-KVM-armv6l && cd One-KVM-armv6l
 ./scripts/build-armv6.sh          # SUITE=bookworm ./scripts/build-armv6.sh for 12
 ```
 
-Result: `dist/one-kvm_<version>_armhf-armv6-<suite>.deb`. The first run creates
-the Raspberry Pi OS base image (uses `sudo` for `mmdebstrap`); later runs reuse
-it and the Rust build cache in `~/.cache/onekvm-armv6/`.
+Result: `dist/one-kvm_<version>_armhf-armv6-<suite>.deb`. The first run builds
+the build environment image; later runs reuse it and the Rust build cache in
+`~/.cache/onekvm-armv6/`.
 
-### Reusable build environment
+### The build environment: one Dockerfile
 
-The build environment is two local Docker images, created once and reused by
-every later build:
-
-- `onekvm-raspbian:<suite>`: Raspberry Pi OS armhf with compilers and -dev packages
-- `onekvm-armv6:<suite>`: the above + Rust (ARMv6 host), libjpeg-turbo 3, libyuv
+`build/cross/Dockerfile.armv6` is a self-contained `linux/arm/v6` image:
+Raspbian (`tianon/raspbian:<suite>-slim`) + gcc/clang and the -dev packages
+(FFmpeg from Raspbian) + Rust with an ARMv6 host toolchain + libjpeg-turbo 3 +
+libyuv. It can be used without the script:
 
 ```sh
-./scripts/build-armv6.sh image    # create/update the images and print a toolchain check
-./scripts/build-armv6.sh          # build the .deb in them (default "build")
+docker build --platform linux/arm/v6 -t onekvm-armv6:trixie -f build/cross/Dockerfile.armv6 build/cross
+docker run --rm -it --platform linux/arm/v6 -v "$PWD":/src onekvm-armv6:trixie
+# inside: cargo build --release   ->  target/release/one-kvm (ARMv6)
+```
+
+Or through the script, which adds caches, the frontend and packaging:
+
+```sh
+./scripts/build-armv6.sh image    # build/update the image and print a toolchain check
+./scripts/build-armv6.sh          # build the .deb in it (default "build")
 ./scripts/build-armv6.sh shell    # shell in the container, repo at /src
 ```
 
-In the shell, `cargo build --release` works directly (the result is
-`target/release/one-kvm`); caches are shared with `build`, and file ownership is handed
-back to you on exit. To recreate an image from scratch:
-`docker rmi onekvm-armv6:trixie onekvm-raspbian:trixie`.
-
-Keep or move the images with `docker save onekvm-armv6:trixie | gzip > onekvm-armv6-trixie.tar.gz`
-and `docker load < onekvm-armv6-trixie.tar.gz`.
+In the shell, `cargo build --release` works directly; caches are shared with
+`build`, and file ownership is handed back to you on exit. Rebuild the image
+from scratch with `docker rmi onekvm-armv6:trixie`. Keep or move it with
+`docker save onekvm-armv6:trixie | gzip > onekvm-armv6-trixie.tar.gz` and
+`docker load < onekvm-armv6-trixie.tar.gz`.
 
 ### GitHub Actions
 
