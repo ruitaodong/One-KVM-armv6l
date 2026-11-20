@@ -1,50 +1,273 @@
-name: Build ARMv6 (Pi Zero / Zero W)
+name: Build One-KVM for Raspberry Pi Zero W (ARMv6 Trixie)
 
-# Runs scripts/build-armv6.sh, which compiles natively in a Raspberry Pi OS
-# armhf container. Needs an arm64 runner whose CPU can run 32-bit ARM code.
 on:
-  workflow_dispatch:
-    inputs:
-      suite:
-        description: Raspberry Pi OS release on the Pi (must match)
-        type: choice
-        options: [trixie, bookworm]
-        default: trixie
-      runner:
-        description: "ubuntu-24.04-arm (GitHub) or self-hosted (e.g. an OCI Ampere A1 VM)"
-        type: choice
-        options: [ubuntu-24.04-arm, self-hosted]
-        default: ubuntu-24.04-arm
+  push:
+    tags:
+      - "*"
 
 permissions:
   contents: read
+  packages: write
 
 jobs:
-  armv6:
-    runs-on: ${{ inputs.runner }}
-    timeout-minutes: 360
+  build-pi0w:
+    runs-on: ubuntu-24.04-arm
     env:
-      SUITE: ${{ inputs.suite }}
-      CACHE: ${{ github.workspace }}/../armv6-cache
+      SYSROOT: /opt/raspbian-trixie-armhf
+      CARGO_BUILD_TARGET: arm-unknown-linux-gnueabihf
+      PKG_NAME: one-kvm
+      PKG_ARCH: armhf
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout One-KVM source at pushed tag
+        uses: actions/checkout@v4
+        with:
+          repository: mofeng-git/One-KVM
+          ref: ${{ github.ref_name }}
+          path: One-KVM
 
-      - name: Check the runner can run 32-bit ARM natively
+      - name: Set lowercase Docker image name
         run: |
-          r=$(docker run --rm --platform linux/arm/v7 debian:trixie linux32 uname -m)
-          echo "32-bit ARM test: $r"
-          [ "$r" = armv8l ] || { echo "::error::This runner can't run 32-bit ARM code natively (got '$r')"; exit 1; }
+          echo "IMAGE_NAME=$(echo "ghcr.io/${GITHUB_REPOSITORY}" | tr '[:upper:]' '[:lower:]')" >> "${GITHUB_ENV}"
 
-      - uses: actions/cache@v4
+      - name: Install host cross-compilation tools
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes --no-install-recommends \
+            binutils-arm-linux-gnueabihf \
+            clang \
+            cmake \
+            g++-arm-linux-gnueabihf \
+            gcc-arm-linux-gnueabihf \
+            libclang-dev \
+            pkg-config \
+            symlinks
+
+      - name: Set up QEMU (arm)
+        uses: docker/setup-qemu-action@v3
         with:
-          path: ${{ env.CACHE }}
-          key: armv6-${{ inputs.suite }}-${{ hashFiles('Cargo.lock') }}
-          restore-keys: armv6-${{ inputs.suite }}-
+          platforms: arm
 
-      - run: ./scripts/build-armv6.sh
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
 
-      - uses: actions/upload-artifact@v4
+      - name: Restore cached Raspbian Trixie ARMv6 sysroot
+        id: cache-sysroot
+        uses: actions/cache@v4
         with:
-          name: one-kvm-armv6-${{ inputs.suite }}
-          path: dist/
-          if-no-files-found: error
+          path: ${{ env.SYSROOT }}
+          key: raspbian-trixie-armhf-sysroot-v1
+
+      - name: Build and export Raspbian Trixie ARMv6 sysroot
+        if: steps.cache-sysroot.outputs.cache-hit != 'true'
+        run: |
+          cat << 'EOF' > /tmp/Dockerfile.sysroot
+          FROM vascoguita/raspios:armhf-trixie
+          ENV DEBIAN_FRONTEND=noninteractive
+          RUN apt-get update && apt-get install --yes --no-install-recommends \
+              libavcodec-dev \
+              libavdevice-dev \
+              libavfilter-dev \
+              libavformat-dev \
+              libavutil-dev \
+              libasound2-dev \
+              libopus-dev \
+              libssl-dev \
+              libswresample-dev \
+              libswscale-dev \
+              libturbojpeg0-dev \
+              libudev-dev \
+              libv4l-dev \
+              && rm --recursive --force /var/lib/apt/lists/*
+          EOF
+
+          docker build \
+            --platform linux/arm/v6 \
+            --file /tmp/Dockerfile.sysroot \
+            --tag raspbian-trixie-sysroot:armhf \
+            /tmp
+
+          CONTAINER_ID="$(docker create --platform linux/arm/v6 raspbian-trixie-sysroot:armhf)"
+          sudo mkdir --parents "${SYSROOT}"
+          docker export "${CONTAINER_ID}" | sudo tar --extract --directory="${SYSROOT}"
+          docker rm "${CONTAINER_ID}"
+
+          sudo symlinks -cr "${SYSROOT}"
+          sudo chown --recursive "$(id --user):$(id --group)" "${SYSROOT}"
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: "npm"
+          cache-dependency-path: One-KVM/web/package-lock.json
+
+      - name: Build web frontend
+        working-directory: One-KVM/web
+        run: |
+          npm install
+          npm run build
+
+      - name: Install Rust toolchain and ARMv6 target
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: arm-unknown-linux-gnueabihf
+
+      - name: Cache Cargo registry and build artifacts
+        uses: Swatinem/rust-cache@v2
+        with:
+          workspaces: One-KVM -> target
+
+      - name: Cross-compile One-KVM natively on arm64 for Pi Zero W
+        working-directory: One-KVM
+        env:
+          CARGO_TARGET_ARM_UNKNOWN_LINUX_GNUEABIHF_LINKER: arm-linux-gnueabihf-gcc
+          CC_arm_unknown_linux_gnueabihf: arm-linux-gnueabihf-gcc
+          CXX_arm_unknown_linux_gnueabihf: arm-linux-gnueabihf-g++
+          AR_arm_unknown_linux_gnueabihf: arm-linux-gnueabihf-ar
+          CFLAGS_arm_unknown_linux_gnueabihf: >-
+            -march=armv6zk -mtune=arm1176jzf-s -mfpu=vfp -mfloat-abi=hard
+            --sysroot=/opt/raspbian-trixie-armhf
+          CXXFLAGS_arm_unknown_linux_gnueabihf: >-
+            -march=armv6zk -mtune=arm1176jzf-s -mfpu=vfp -mfloat-abi=hard
+            --sysroot=/opt/raspbian-trixie-armhf
+          RUSTFLAGS: >-
+            -C target-cpu=arm1176jzf-s
+            -C target-feature=+vfp2,-neon,-v7
+            -C link-arg=--sysroot=/opt/raspbian-trixie-armhf
+            -C link-arg=-Wl,-rpath-link=/opt/raspbian-trixie-armhf/usr/lib/arm-linux-gnueabihf
+            -C link-arg=-Wl,-rpath-link=/opt/raspbian-trixie-armhf/lib/arm-linux-gnueabihf
+          PKG_CONFIG_ALLOW_CROSS: "1"
+          PKG_CONFIG_SYSROOT_DIR: /opt/raspbian-trixie-armhf
+          PKG_CONFIG_LIBDIR: >-
+            /opt/raspbian-trixie-armhf/usr/lib/arm-linux-gnueabihf/pkgconfig:/opt/raspbian-trixie-armhf/usr/share/pkgconfig
+          BINDGEN_EXTRA_CLANG_ARGS: >-
+            --sysroot=/opt/raspbian-trixie-armhf
+            --target=arm-unknown-linux-gnueabihf
+            -I/opt/raspbian-trixie-armhf/usr/include/arm-linux-gnueabihf
+          FFMPEG_STATIC: "0"
+        run: |
+          cargo build --release --target "${CARGO_BUILD_TARGET}"
+
+      - name: Audit ELF attributes for pure ARMv6 compatibility
+        working-directory: One-KVM
+        run: |
+          BIN_PATH="target/${CARGO_BUILD_TARGET}/release/${PKG_NAME}"
+          arm-linux-gnueabihf-readelf --arch-specific "${BIN_PATH}"
+          if arm-linux-gnueabihf-readelf --arch-specific "${BIN_PATH}" | grep --quiet "Tag_Advanced_SIMD_arch"; then
+            echo "ERROR: NEON instructions detected in binary! Aborting."
+            exit 1
+          fi
+          arm-linux-gnueabihf-objdump --private-headers "${BIN_PATH}" | grep NEEDED
+
+      - name: Package .deb for Raspberry Pi OS Trixie (armhf)
+        working-directory: One-KVM
+        run: |
+          TAG_VER="${GITHUB_REF_NAME#v}"
+          if [[ "${TAG_VER}" =~ ^[0-9] ]]; then
+            PKG_VERSION="${TAG_VER}"
+          else
+            PKG_VERSION="$(awk -F'"' '/^version[[:space:]]*=/ {print $2; exit}' Cargo.toml)"
+          fi
+
+          BIN_PATH="target/${CARGO_BUILD_TARGET}/release/${PKG_NAME}"
+          OUTPUT_DEB="${GITHUB_WORKSPACE}/${PKG_NAME}_${PKG_VERSION}-pi0w_${PKG_ARCH}.deb"
+          STAGE_DIR="/tmp/deb-stage"
+
+          rm --recursive --force "${STAGE_DIR}"
+          mkdir --parents \
+            "${STAGE_DIR}/DEBIAN" \
+            "${STAGE_DIR}/usr/bin" \
+            "${STAGE_DIR}/lib/systemd/system" \
+            "${STAGE_DIR}/etc/udev/rules.d" \
+            "${STAGE_DIR}/var/lib/one-kvm"
+
+          install --mode=0755 "${BIN_PATH}" "${STAGE_DIR}/usr/bin/${PKG_NAME}"
+
+          cat << 'EOF' > "${STAGE_DIR}/lib/systemd/system/one-kvm.service"
+          [Unit]
+          Description=One-KVM Rust IP-KVM Daemon
+          After=network-online.target systemd-modules-load.service
+          Wants=network-online.target
+
+          [Service]
+          Type=simple
+          WorkingDirectory=/var/lib/one-kvm
+          ExecStart=/usr/bin/one-kvm
+          Restart=on-failure
+          RestartSec=3
+          SupplementaryGroups=video audio
+
+          [Install]
+          WantedBy=multi-user.target
+          EOF
+
+          cat << 'EOF' > "${STAGE_DIR}/etc/udev/rules.d/99-one-kvm.rules"
+          KERNEL=="hidg[0-9]*", SUBSYSTEM=="hidg", GROUP="video", MODE="0660"
+          SUBSYSTEM=="video4linux", GROUP="video", MODE="0660"
+          EOF
+
+          cat << EOF > "${STAGE_DIR}/DEBIAN/control"
+          Package: ${PKG_NAME}
+          Version: ${PKG_VERSION}
+          Section: utils
+          Priority: optional
+          Architecture: ${PKG_ARCH}
+          Depends: libc6, libssl3t64 | libssl3, libv4l-0t64 | libv4l-0, libasound2t64 | libasound2, libopus0, libturbojpeg0, libavcodec61 | libavcodec60, libavformat61 | libavformat60, libavutil59 | libavutil58, libswscale8 | libswscale7, libswresample5 | libswresample4
+          Maintainer: GitHub Actions ARMv6 Build
+          Description: One-KVM Rust IP-KVM daemon built for Raspberry Pi Zero W (ARMv6 Trixie)
+          EOF
+
+          cat << 'EOF' > "${STAGE_DIR}/DEBIAN/postinst"
+          #!/bin/sh
+          set -e
+          if [ "$1" = "configure" ]; then
+            udevadm control --reload-rules || true
+            udevadm trigger || true
+            systemctl daemon-reload || true
+          fi
+          exit 0
+          EOF
+          chmod 0755 "${STAGE_DIR}/DEBIAN/postinst"
+
+          dpkg-deb --build --root-owner-group "${STAGE_DIR}" "${OUTPUT_DEB}"
+          dpkg-deb --info "${OUTPUT_DEB}"
+          echo "OUTPUT_DEB=${OUTPUT_DEB}" >> "${GITHUB_ENV}"
+
+      - name: Upload .deb artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: one-kvm-${{ github.ref_name }}-pi0w-armhf
+          path: ${{ env.OUTPUT_DEB }}
+
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Prepare runtime Docker build context
+        run: |
+          mkdir --parents /tmp/docker-runtime
+          cp "${OUTPUT_DEB}" /tmp/docker-runtime/one-kvm.deb
+          cat << 'EOF' > /tmp/docker-runtime/Dockerfile
+          FROM vascoguita/raspios:armhf-trixie
+          ENV DEBIAN_FRONTEND=noninteractive
+          COPY one-kvm.deb /tmp/one-kvm.deb
+          RUN apt-get update \
+              && apt-get install --yes --no-install-recommends /tmp/one-kvm.deb \
+              && rm --recursive --force /var/lib/apt/lists/* /tmp/one-kvm.deb
+          WORKDIR /var/lib/one-kvm
+          ENTRYPOINT ["/usr/bin/one-kvm"]
+          EOF
+
+      - name: Build and push linux/arm/v6 Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: /tmp/docker-runtime
+          file: /tmp/docker-runtime/Dockerfile
+          platforms: linux/arm/v6
+          push: true
+          tags: |
+            ${{ env.IMAGE_NAME }}:${{ github.ref_name }}
