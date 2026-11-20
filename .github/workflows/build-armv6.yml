@@ -6,7 +6,7 @@ on:
       - "*"
 
 permissions:
-  contents: read
+  contents: write
   packages: write
 
 jobs:
@@ -52,36 +52,16 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ${{ env.SYSROOT }}
-          key: raspbian-trixie-armhf-sysroot-v1
+          key: raspbian-trixie-armhf-sysroot-v2-${{ hashFiles('Dockerfile.sysroot') }}
 
       - name: Build and export Raspbian Trixie ARMv6 sysroot
         if: steps.cache-sysroot.outputs.cache-hit != 'true'
         run: |
-          cat << 'EOF' > /tmp/Dockerfile.sysroot
-          FROM vascoguita/raspios:armhf-trixie
-          ENV DEBIAN_FRONTEND=noninteractive
-          RUN apt-get update && apt-get install --yes --no-install-recommends \
-              libavcodec-dev \
-              libavdevice-dev \
-              libavfilter-dev \
-              libavformat-dev \
-              libavutil-dev \
-              libasound2-dev \
-              libopus-dev \
-              libssl-dev \
-              libswresample-dev \
-              libswscale-dev \
-              libturbojpeg0-dev \
-              libudev-dev \
-              libv4l-dev \
-              && rm --recursive --force /var/lib/apt/lists/*
-          EOF
-
           docker build \
             --platform linux/arm/v6 \
-            --file /tmp/Dockerfile.sysroot \
+            --file Dockerfile.sysroot \
             --tag raspbian-trixie-sysroot:armhf \
-            /tmp
+            .
 
           CONTAINER_ID="$(docker create --platform linux/arm/v6 raspbian-trixie-sysroot:armhf)"
           sudo mkdir --parents "${SYSROOT}"
@@ -89,6 +69,9 @@ jobs:
           docker rm "${CONTAINER_ID}"
 
           sudo symlinks -cr "${SYSROOT}"
+          for lib in "${SYSROOT}"/usr/lib/arm-linux-gnueabihf/libyuv.*; do
+            sudo ln --symbolic --force "arm-linux-gnueabihf/$(basename "${lib}")" "${SYSROOT}/usr/lib/$(basename "${lib}")"
+          done
           sudo chown --recursive "$(id --user):$(id --group)" "${SYSROOT}"
 
       - name: Setup Node.js
@@ -113,6 +96,12 @@ jobs:
       - name: Cross-compile One-KVM natively on arm64 for Pi Zero W
         env:
           CARGO_TARGET_ARM_UNKNOWN_LINUX_GNUEABIHF_LINKER: arm-linux-gnueabihf-gcc
+          CARGO_TARGET_ARM_UNKNOWN_LINUX_GNUEABIHF_RUSTFLAGS: >-
+            -C target-cpu=arm1176jzf-s
+            -C target-feature=+vfp2,-neon,-v7
+            -C link-arg=--sysroot=/opt/raspbian-trixie-armhf
+            -C link-arg=-Wl,-rpath-link=/opt/raspbian-trixie-armhf/usr/lib/arm-linux-gnueabihf
+            -C link-arg=-Wl,-rpath-link=/opt/raspbian-trixie-armhf/lib/arm-linux-gnueabihf
           CC_arm_unknown_linux_gnueabihf: arm-linux-gnueabihf-gcc
           CXX_arm_unknown_linux_gnueabihf: arm-linux-gnueabihf-g++
           AR_arm_unknown_linux_gnueabihf: arm-linux-gnueabihf-ar
@@ -122,12 +111,6 @@ jobs:
           CXXFLAGS_arm_unknown_linux_gnueabihf: >-
             -march=armv6zk -mtune=arm1176jzf-s -mfpu=vfp -mfloat-abi=hard
             --sysroot=/opt/raspbian-trixie-armhf
-          RUSTFLAGS: >-
-            -C target-cpu=arm1176jzf-s
-            -C target-feature=+vfp2,-neon,-v7
-            -C link-arg=--sysroot=/opt/raspbian-trixie-armhf
-            -C link-arg=-Wl,-rpath-link=/opt/raspbian-trixie-armhf/usr/lib/arm-linux-gnueabihf
-            -C link-arg=-Wl,-rpath-link=/opt/raspbian-trixie-armhf/lib/arm-linux-gnueabihf
           PKG_CONFIG_ALLOW_CROSS: "1"
           PKG_CONFIG_SYSROOT_DIR: /opt/raspbian-trixie-armhf
           PKG_CONFIG_LIBDIR: >-
@@ -136,6 +119,8 @@ jobs:
             --sysroot=/opt/raspbian-trixie-armhf
             --target=arm-unknown-linux-gnueabihf
             -I/opt/raspbian-trixie-armhf/usr/include/arm-linux-gnueabihf
+          ONE_KVM_LIBS_PATH: /opt/raspbian-trixie-armhf/usr
+          LIBYUV_STATIC: "0"
           FFMPEG_STATIC: "0"
         run: |
           cargo build --release --target "${CARGO_BUILD_TARGET}"
@@ -159,8 +144,13 @@ jobs:
             PKG_VERSION="$(awk -F'"' '/^version[[:space:]]*=/ {print $2; exit}' Cargo.toml)"
           fi
 
+          if [[ "${PKG_VERSION}" == *-pi0w ]]; then
+            OUTPUT_DEB="/tmp/${PKG_NAME}_${PKG_VERSION}_${PKG_ARCH}.deb"
+          else
+            OUTPUT_DEB="/tmp/${PKG_NAME}_${PKG_VERSION}-pi0w_${PKG_ARCH}.deb"
+          fi
+
           BIN_PATH="target/${CARGO_BUILD_TARGET}/release/${PKG_NAME}"
-          OUTPUT_DEB="/tmp/${PKG_NAME}_${PKG_VERSION}-pi0w_${PKG_ARCH}.deb"
           STAGE_DIR="/tmp/deb-stage"
 
           rm --recursive --force "${STAGE_DIR}"
@@ -202,7 +192,7 @@ jobs:
           Section: utils
           Priority: optional
           Architecture: ${PKG_ARCH}
-          Depends: libc6, libssl3t64 | libssl3, libv4l-0t64 | libv4l-0, libasound2t64 | libasound2, libopus0, libturbojpeg0, libavcodec61 | libavcodec60, libavformat61 | libavformat60, libavutil59 | libavutil58, libswscale8 | libswscale7, libswresample5 | libswresample4
+          Depends: libc6, libssl3t64 | libssl3, libv4l-0t64 | libv4l-0, libasound2t64 | libasound2, libopus0, libturbojpeg0, libyuv0, libavcodec61 | libavcodec60, libavformat61 | libavformat60, libavutil59 | libavutil58, libswscale8 | libswscale7, libswresample5 | libswresample4
           Maintainer: Rui-Tao Dong
           Description: One-KVM Rust IP-KVM daemon built for Raspberry Pi Zero W (ARMv6 Trixie)
           EOF
@@ -221,13 +211,22 @@ jobs:
 
           dpkg-deb --build --root-owner-group "${STAGE_DIR}" "${OUTPUT_DEB}"
           dpkg-deb --info "${OUTPUT_DEB}"
-          echo "OUTPUT_DEB=${OUTPUT_DEB}" >> "${GITHUB_ENV}"
 
-      - name: Upload .deb artifact
+          (
+            cd "$(dirname "${OUTPUT_DEB}")"
+            sha256sum "$(basename "${OUTPUT_DEB}")" > "${OUTPUT_DEB}.sha256"
+          )
+
+          echo "OUTPUT_DEB=${OUTPUT_DEB}" >> "${GITHUB_ENV}"
+          echo "OUTPUT_DEB_NAME=$(basename "${OUTPUT_DEB}")" >> "${GITHUB_ENV}"
+
+      - name: Upload .deb workflow artifact
         uses: actions/upload-artifact@v4
         with:
           name: one-kvm-${{ github.ref_name }}-pi0w-armhf
-          path: ${{ env.OUTPUT_DEB }}
+          path: |
+            ${{ env.OUTPUT_DEB }}
+            ${{ env.OUTPUT_DEB }}.sha256
 
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
@@ -246,7 +245,8 @@ jobs:
           COPY one-kvm.deb /tmp/one-kvm.deb
           RUN apt-get update \
               && apt-get install --yes --no-install-recommends /tmp/one-kvm.deb \
-              && rm --recursive --force /var/lib/apt/lists/* /tmp/one-kvm.deb
+              && apt-get clean \
+              && rm --recursive --force /var/lib/apt/lists/* /tmp/one-kvm.deb /var/cache/apt/archives/*.deb
           WORKDIR /var/lib/one-kvm
           ENTRYPOINT ["/usr/bin/one-kvm"]
           EOF
@@ -262,3 +262,24 @@ jobs:
             org.opencontainers.image.source=https://github.com/${{ github.repository }}
           tags: |
             ${{ env.IMAGE_NAME }}:${{ github.ref_name }}
+
+      - name: Create GitHub Release and attach .deb
+        uses: softprops/action-gh-release@v2
+        with:
+          generate_release_notes: true
+          body: |
+            ### Raspberry Pi Zero W (ARMv6 / Raspberry Pi OS Trixie)
+
+            **Install `.deb` directly on Pi Zero W:**
+            ```bash
+            curl --fail --location --remote-name [https://github.com/$](https://github.com/$){{ github.repository }}/releases/download/${{ github.ref_name }}/${{ env.OUTPUT_DEB_NAME }}
+            sudo apt-get update && sudo apt-get install --yes ./${{ env.OUTPUT_DEB_NAME }}
+            ```
+
+            **Docker image (`linux/arm/v6`):**
+            ```bash
+            docker pull ${{ env.IMAGE_NAME }}:${{ github.ref_name }}
+            ```
+          files: |
+            ${{ env.OUTPUT_DEB }}
+            ${{ env.OUTPUT_DEB }}.sha256

@@ -1,29 +1,15 @@
 # syntax=docker/dockerfile:1
 FROM vascoguita/raspios:armhf-trixie
 
-ENV DEBIAN_FRONTEND=noninteractive \
-    RUSTUP_HOME=/usr/local/rustup \
-    CARGO_HOME=/usr/local/cargo \
-    PATH=/usr/local/cargo/bin:$PATH \
-    CARGO_BUILD_TARGET=arm-unknown-linux-gnueabihf
+ENV DEBIAN_FRONTEND=noninteractive
 
-# Install native ARMv6 Raspbian Trixie toolchain and One-KVM C/C++ dependencies
 RUN apt-get update && apt-get install --yes --no-install-recommends \
-    build-essential \
-    ca-certificates \
-    clang \
-    cmake \
-    curl \
-    dpkg-dev \
-    file \
-    git \
     libavcodec-dev \
     libavdevice-dev \
     libavfilter-dev \
     libavformat-dev \
     libavutil-dev \
     libasound2-dev \
-    libclang-dev \
     libopus-dev \
     libssl-dev \
     libswresample-dev \
@@ -31,29 +17,5 @@ RUN apt-get update && apt-get install --yes --no-install-recommends \
     libturbojpeg0-dev \
     libudev-dev \
     libv4l-dev \
-    pkg-config \
-    util-linux \
+    libyuv-dev \
     && rm --recursive --force /var/lib/apt/lists/*
-
-# Install Rustup and the ARMv6 hard-float target
-RUN curl --proto '=https' --tlsv1.2 --silent --show-error --fail https://sh.rustup.rs \
-    | sh -s -- \
-      -y \
-      --default-toolchain stable \
-      --profile minimal \
-      --default-host arm-unknown-linux-gnueabihf
-
-# Enforce strict ARM1176JZF-S (Pi Zero W) codegen across Rust and C/C++ crates.
-# Thin LTO + capped jobs keep memory usage safely under the 32-bit 3 GB VA limit.
-ENV RUSTFLAGS="-C target-cpu=arm1176jzf-s -C target-feature=+vfp2,-neon,-v7" \
-    CFLAGS="-march=armv6zk -mtune=arm1176jzf-s -mfpu=vfp -mfloat-abi=hard" \
-    CXXFLAGS="-march=armv6zk -mtune=arm1176jzf-s -mfpu=vfp -mfloat-abi=hard" \
-    FFMPEG_STATIC="0" \
-    CARGO_PROFILE_RELEASE_LTO="thin" \
-    CARGO_PROFILE_RELEASE_CODEGEN_UNITS="4" \
-    CARGO_BUILD_JOBS="2"
-
-WORKDIR /workspace
-
-ENTRYPOINT ["/usr/bin/linux32"]
-CMD ["/bin/bash"]
