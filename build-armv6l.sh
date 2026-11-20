@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 set -euo pipefail
 
-REPO_URL="https://github.com/mofeng-git/One-KVM.git"
+REPO_URL="https://github.com/ruitaodong/One-KVM-armv6l.git"
 REPO_REF="${REPO_REF:-main}"
 SRC_DIR="${PWD}/One-KVM"
 BASE_IMAGE="vascoguita/raspios:armhf-trixie"
