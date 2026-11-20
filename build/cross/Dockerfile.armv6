@@ -1,3 +1,4 @@
+# syntax=docker/dockerfile:1
 # One-KVM ARMv6 build environment (Raspberry Pi Zero / Zero W / Pi 1)
 #
 # A linux/arm/v6 Raspbian (Raspberry Pi OS armhf) image with gcc, Rust and the
@@ -47,17 +48,6 @@ ENV LANG=C.UTF-8 \
     BINDGEN_EXTRA_CLANG_ARGS="-D_FILE_OFFSET_BITS=64 -D_TIME_BITS=${TIME_BITS}" \
     RUST_LIBC_UNSTABLE_GNU_TIME_BITS=${TIME_BITS}
 
-# Rust with an ARMv6 host toolchain. RUSTUP_USE_CURL: download with libcurl
-# (rustup's built-in client stalled on GitHub's runner); -v logs each download;
-# timeout fails instead of hanging.
-RUN curl -fsSL --retry 3 -o /tmp/rustup-init \
-        https://static.rust-lang.org/rustup/dist/arm-unknown-linux-gnueabihf/rustup-init \
-    && chmod +x /tmp/rustup-init \
-    && RUSTUP_USE_CURL=1 timeout 20m /tmp/rustup-init -y -v --profile minimal \
-        --default-host arm-unknown-linux-gnueabihf \
-    && rm /tmp/rustup-init \
-    && rustc --version && cargo --version
-
 # libjpeg-turbo 3.x (One-KVM needs the TurboJPEG 3 API; Raspbian has 2.1).
 # No SIMD: its 32-bit ARM SIMD code is NEON, which ARMv6 doesn't have.
 RUN git clone -q --depth 1 --branch ${LIBJPEG_TURBO_VERSION} https://github.com/libjpeg-turbo/libjpeg-turbo.git /tmp/jpeg \
@@ -78,6 +68,17 @@ RUN git init -q /tmp/yuv && cd /tmp/yuv \
         -DCMAKE_CXX_FLAGS="$CXXFLAGS -DHAVE_JPEG -DLIBYUV_DISABLE_NEON" \
     && make -C build -j"$(nproc)" install \
     && rm -rf /tmp/yuv
+
+# Rust with an ARMv6 host toolchain. Last of the build steps: Docker
+# re-checks the URL on each build, so a new rustup-init release only
+# re-runs this step. RUSTUP_USE_CURL: download with libcurl (rustup's
+# built-in client stalled on GitHub's runner); -v logs each download;
+# timeout fails instead of hanging.
+ADD --chmod=755 https://static.rust-lang.org/rustup/dist/arm-unknown-linux-gnueabihf/rustup-init /tmp/rustup-init
+RUN RUSTUP_USE_CURL=1 timeout 20m /tmp/rustup-init -y -v --profile minimal \
+        --default-host arm-unknown-linux-gnueabihf \
+    && rm /tmp/rustup-init \
+    && rustc --version && cargo --version
 
 # ONE_KVM_LIBS_PATH: libyuv is found here. It has no libavcodec.a, so hwcodec
 # falls back to pkg-config and links Raspbian's shared FFmpeg.
