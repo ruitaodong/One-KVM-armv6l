@@ -24,6 +24,7 @@ RUN apt-get update && apt-get install --yes --no-install-recommends \
     libavutil-dev \
     libasound2-dev \
     libclang-dev \
+    libdrm-dev \
     libopus-dev \
     libssl-dev \
     libswresample-dev \
