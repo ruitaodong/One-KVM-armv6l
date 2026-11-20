@@ -31,6 +31,7 @@ RUN apt-get update && apt-get install --yes --no-install-recommends \
     libturbojpeg0-dev \
     libudev-dev \
     libv4l-dev \
+    libyuv-dev \
     pkg-config \
     util-linux \
     && rm --recursive --force /var/lib/apt/lists/*
@@ -41,6 +42,7 @@ RUN curl --proto '=https' --tlsv1.2 --silent --show-error --fail https://sh.rust
       -y \
       --default-toolchain stable \
       --profile minimal \
+      --component rustfmt \
       --default-host arm-unknown-linux-gnueabihf
 
 # Enforce strict ARM1176JZF-S (Pi Zero W) codegen across Rust and C/C++ crates.
