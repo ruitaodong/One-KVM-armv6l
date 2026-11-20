@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-FROM --platform=linux/arm/v6 vascoguita/raspios:armhf-trixie
+FROM vascoguita/raspios:armhf-trixie
 
 ENV DEBIAN_FRONTEND=noninteractive \
     RUSTUP_HOME=/usr/local/rustup \
