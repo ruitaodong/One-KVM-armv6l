@@ -55,5 +55,5 @@ ENV RUSTFLAGS="-C target-cpu=arm1176jzf-s -C target-feature=+vfp2,-neon,-v7" \
 
 WORKDIR /workspace
 
-ENTRYPOINT ["/usr/bin/setarch", "armv6l"]
+ENTRYPOINT ["/usr/bin/linux32"]
 CMD ["/bin/bash"]
