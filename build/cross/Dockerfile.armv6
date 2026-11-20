@@ -16,8 +16,11 @@
 # Base: tianon/raspbian, a minimal Raspbian image built from the Raspbian
 # archive by Tianon Gravi (maintainer of Docker's official Debian images).
 
+# The platform comes from the build command (docker build --platform
+# linux/arm/v6), not from FROM: tianon/raspbian is arm/v6-only, so building
+# without it fails with "no match for platform" instead of picking another.
 ARG SUITE=trixie
-FROM --platform=linux/arm/v6 tianon/raspbian:${SUITE}-slim
+FROM tianon/raspbian:${SUITE}-slim
 
 # 64 on trixie (Raspberry Pi OS 13 armhf uses 64-bit time_t), 32 on bookworm
 ARG TIME_BITS=64
