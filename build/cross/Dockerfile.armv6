@@ -27,10 +27,11 @@ ARG TIME_BITS=64
 ARG LIBJPEG_TURBO_VERSION=3.1.4.1
 ARG LIBYUV_REV=957f295ea946cbbd13fcfc46e7066f2efa801233
 
-# Compilers and the -dev packages (FFmpeg, ALSA, udev, ... from Raspbian itself)
+# Compilers and the -dev packages (FFmpeg, ALSA, udev, ... from Raspbian itself).
+# No curl or git: sources and rustup-init are fetched with ADD.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        build-essential pkg-config cmake git curl ca-certificates xz-utils util-linux \
+        build-essential pkg-config cmake ca-certificates xz-utils util-linux \
         clang libclang-dev \
         libasound2-dev libudev-dev libv4l-dev libdrm-dev \
         libavcodec-dev libavutil-dev libopus-dev zlib1g-dev \
@@ -48,22 +49,22 @@ ENV LANG=C.UTF-8 \
     PATH=/root/.cargo/bin:$PATH \
     CFLAGS="-D_FILE_OFFSET_BITS=64 -D_TIME_BITS=${TIME_BITS}" \
     CXXFLAGS="-D_FILE_OFFSET_BITS=64 -D_TIME_BITS=${TIME_BITS}" \
-    BINDGEN_EXTRA_CLANG_ARGS="-D_FILE_OFFSET_BITS=64 -D_TIME_BITS=${TIME_BITS}" \
-    RUST_LIBC_UNSTABLE_GNU_TIME_BITS=${TIME_BITS}
+    BINDGEN_EXTRA_CLANG_ARGS="-D_FILE_OFFSET_BITS=64 -D_TIME_BITS=${TIME_BITS}"
 
 # libjpeg-turbo 3.x (One-KVM needs the TurboJPEG 3 API; Raspbian has 2.1).
 # No SIMD: its 32-bit ARM SIMD code is NEON, which ARMv6 doesn't have.
-RUN git clone -q --depth 1 --branch ${LIBJPEG_TURBO_VERSION} https://github.com/libjpeg-turbo/libjpeg-turbo.git /tmp/jpeg \
-    && cmake -S /tmp/jpeg -B /tmp/jpeg/build -DCMAKE_BUILD_TYPE=Release \
+ADD https://github.com/libjpeg-turbo/libjpeg-turbo.git#${LIBJPEG_TURBO_VERSION} /tmp/jpeg
+RUN cmake -S /tmp/jpeg -B /tmp/jpeg/build -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_INSTALL_PREFIX=/usr/local -DCMAKE_INSTALL_LIBDIR=lib \
         -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
         -DENABLE_SHARED=OFF -DENABLE_STATIC=ON -DWITH_SIMD=OFF \
     && make -C /tmp/jpeg/build -j"$(nproc)" install \
     && rm -rf /tmp/jpeg
 
-# libyuv at the revision upstream One-KVM uses (NEON paths compiled out)
-RUN git init -q /tmp/yuv && cd /tmp/yuv \
-    && git fetch -q --depth 1 https://github.com/lemenkov/libyuv ${LIBYUV_REV} && git checkout -q FETCH_HEAD \
+# libyuv at the revision upstream One-KVM uses (NEON paths compiled out).
+# Raspbian's own libyuv is too old (no RGB24ToNV12).
+ADD https://github.com/lemenkov/libyuv.git#${LIBYUV_REV} /tmp/yuv
+RUN cd /tmp/yuv \
     && cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local \
         -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
         -DJPEG_INCLUDE_DIR=/usr/local/include -DJPEG_LIBRARY=/usr/local/lib/libjpeg.a \
@@ -74,12 +75,16 @@ RUN git init -q /tmp/yuv && cd /tmp/yuv \
 
 # Rust with an ARMv6 host toolchain. Last of the build steps: Docker
 # re-checks the URL on each build, so a new rustup-init release only
-# re-runs this step. RUSTUP_USE_CURL: download with libcurl (rustup's
-# built-in client stalled on GitHub's runner); -v logs each download;
-# timeout fails instead of hanging.
+# re-runs this step. rustup's own downloader is used (its curl backend is
+# deprecated); -v logs each download, and a stalled attempt is killed
+# after 10 minutes and retried, up to 3 times.
 ADD --chmod=755 https://static.rust-lang.org/rustup/dist/arm-unknown-linux-gnueabihf/rustup-init /tmp/rustup-init
-RUN RUSTUP_USE_CURL=1 timeout 20m /tmp/rustup-init -y -v --profile minimal \
-        --default-host arm-unknown-linux-gnueabihf \
+RUN for i in 1 2 3; do \
+        timeout 10m /tmp/rustup-init -y -v --profile minimal \
+            --default-host arm-unknown-linux-gnueabihf && break; \
+        echo "rustup-init attempt $i failed or stalled"; \
+        [ "$i" = 3 ] && exit 1; sleep 5; \
+    done \
     && rm /tmp/rustup-init \
     && rustc --version && cargo --version
 
@@ -87,9 +92,12 @@ RUN RUSTUP_USE_CURL=1 timeout 20m /tmp/rustup-init -y -v --profile minimal \
 # falls back to pkg-config and links Raspbian's shared FFmpeg.
 # Thin LTO: rustc is a 32-bit program here (max 4 GB address space), and
 # One-KVM's default full LTO with one codegen unit may not fit.
+# --allow-multiple-definition: libjpeg.a (for libyuv) and libturbojpeg.a
+# both contain the libjpeg functions; upstream One-KVM links with it too.
 ENV ONE_KVM_LIBS_PATH=/usr/local \
     LIBYUV_STATIC=1 \
-    CARGO_PROFILE_RELEASE_LTO=thin
+    CARGO_PROFILE_RELEASE_LTO=thin \
+    RUSTFLAGS="-C link-arg=-Wl,--allow-multiple-definition"
 
 WORKDIR /src
 CMD ["bash"]
