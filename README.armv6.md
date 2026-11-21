@@ -1,50 +1,55 @@
 # One-KVM for ARMv6 (Raspberry Pi Zero / Zero W / Pi 1)
 
 Upstream's armhf packages are ARMv7 and crash on the Zero/Zero W with
-`Illegal instruction`. This fork builds a real ARMv6 package the simple way, with **no
-cross-compiling**: a `linux/arm/v6` Raspberry Pi OS container runs directly on
-an arm64 host and compiles One-KVM natively, exactly as on a Pi. Raspberry Pi OS's
-compiler already targets ARMv6, and FFmpeg, ALSA, udev etc. come from its own
-packages. Only libjpeg-turbo 3 and libyuv are built from source.
+`Illegal instruction`. This fork builds a real ARMv6 package for
+**Raspberry Pi OS 13 (trixie)** with **no cross-compiling**: a `linux/arm/v6`
+Raspberry Pi OS container compiles One-KVM natively, exactly as on a Pi.
 
-It also passes UYVY frames from HDMI-CSI bridges (TC358743) straight to the
-Pi's hardware H.264 encoder (`ONE_KVM_PI_UYVY_DIRECT=0` disables this).
+It is trimmed for one job: **hardware H.264 from a CSI capture bridge**.
 
-**The build host** must be arm64 Linux whose CPU runs 32-bit ARM code:
-Oracle Cloud Ampere A1, a Pi 4/400 on a 64-bit OS, or a GitHub arm64 runner
-if its CPU supports it. Check (must print `armv8l`):
+- FFmpeg is built from source as a tiny static library with only the Pi's
+  V4L2 M2M H.264 encoder (`h264_v4l2m2m`, bcm2835-codec). No VAAPI, VDPAU,
+  DRM, x264, x265, VP8/VP9: the package doesn't pull in Raspbian's FFmpeg and
+  its dependency tree. Other codecs simply fail One-KVM's encoder probe.
+- UYVY frames from HDMI-CSI bridges (TC358743) go straight to the encoder,
+  without color conversion (`ONE_KVM_PI_UYVY_DIRECT=0` disables this).
+- `Depends:` is computed with `dpkg-shlibdeps` from what the binary actually
+  links (libc, libstdc++, ALSA, Opus, udev).
+- libjpeg-turbo 3 and libyuv are built from source and linked statically.
+
+**The build host** is Linux with Docker. Fastest is an arm64 machine whose CPU
+runs 32-bit ARM code (GitHub's `ubuntu-24.04-arm` runners, Oracle Cloud Ampere
+A1, a Pi 4/400 on a 64-bit OS); check (prints `armv8l`):
 
 ```sh
 docker run --rm --platform linux/arm/v7 debian:trixie linux32 uname -m
 ```
 
-(Apple Silicon and x86 machines can't run 32-bit ARM natively.)
-
-**The package must match the Pi's Raspberry Pi OS release** (FFmpeg comes from
-it): `SUITE=trixie` (13, default) or `SUITE=bookworm` (12). On the Pi:
-`grep VERSION_CODENAME /etc/os-release`.
+Anything else (x86, Graviton 3+, Apple Silicon VMs) works under
+QEMU after `docker run --privileged --rm tonistiigi/binfmt --install arm`,
+several times slower.
 
 ## Build
 
 ```sh
 git clone https://github.com/ruitaodong/One-KVM-armv6l && cd One-KVM-armv6l
-./scripts/build-armv6.sh          # SUITE=bookworm ./scripts/build-armv6.sh for 12
+./scripts/build-armv6.sh
 ```
 
-Result: `dist/one-kvm_<version>_armhf-armv6-<suite>.deb`. The first run builds
-the build environment image; later runs reuse it and the Rust build cache in
+Result: `dist/one-kvm_<version>_armhf-armv6.deb`. The first run builds the
+build environment image; later runs reuse it and the Rust build cache in
 `~/.cache/onekvm-armv6/`.
 
 ### The build environment: one Dockerfile
 
 `build/cross/Dockerfile.armv6` is a self-contained `linux/arm/v6` image:
-Raspbian (`tianon/raspbian:<suite>-slim`) + gcc/clang and the -dev packages
-(FFmpeg from Raspbian) + Rust with an ARMv6 host toolchain + libjpeg-turbo 3 +
+Raspbian (`tianon/raspbian:trixie-slim`) + gcc/clang and the -dev packages +
+Rust with an ARMv6 host toolchain + minimal static FFmpeg + libjpeg-turbo 3 +
 libyuv. It can be used without the script:
 
 ```sh
-docker build --platform linux/arm/v6 -t onekvm-armv6:trixie -f build/cross/Dockerfile.armv6 build/cross
-docker run --rm -it --platform linux/arm/v6 -v "$PWD":/src onekvm-armv6:trixie
+docker build --platform linux/arm/v6 -t onekvm-armv6 -f build/cross/Dockerfile.armv6 build/cross
+docker run --rm -it --platform linux/arm/v6 -v "$PWD":/src onekvm-armv6
 # inside: cargo build --release   ->  target/release/one-kvm (ARMv6)
 ```
 
@@ -58,42 +63,36 @@ Or through the script, which adds caches, the frontend and packaging:
 
 In the shell, `cargo build --release` works directly; caches are shared with
 `build`, and file ownership is handed back to you on exit. Rebuild the image
-from scratch with `docker rmi onekvm-armv6:trixie`. Keep or move it with
-`docker save onekvm-armv6:trixie | gzip > onekvm-armv6-trixie.tar.gz` and
-`docker load < onekvm-armv6-trixie.tar.gz`.
+from scratch with `docker rmi onekvm-armv6`.
 
 ### GitHub Actions
 
-`.github/workflows/build-armv6.yml` runs `scripts/build-armv6.sh` and
-publishes the packages to a GitHub Release:
+`.github/workflows/build-armv6.yml` runs `scripts/build-armv6.sh`:
 
 - **Push a tag** (`git tag v0.2.9-armv6 && git push origin v0.2.9-armv6`):
-  builds trixie and bookworm and attaches `one-kvm_<version>_armhf-armv6-<suite>.deb`,
-  the bare binaries and `SHA256SUMS-armv6-<suite>` to the release for that tag.
-- **Actions → Build ARMv6 (Pi Zero / Zero W) → Run workflow**: pick the suite
-  and runner; fill in *release_tag* to publish, otherwise download the
-  `one-kvm-armv6-<suite>` artifact.
+  attaches `one-kvm_<version>_armhf-armv6.deb`, the bare binary and
+  `SHA256SUMS` to the release for that tag.
+- **Actions → Build ARMv6 (Pi Zero / Zero W) → Run workflow**: pick the
+  runner; fill in *release_tag* to publish, otherwise download the
+  `one-kvm-armv6` artifact.
 
 Each run also pushes the build environment image to GHCR as
-`ghcr.io/ruitaodong/one-kvm-armv6-dev:<suite>` (plus `:<suite>-<commit>` and,
-for tags, `:<suite>-<tag>`). Locally you can reuse its layers instead of
-building the environment from scratch:
+`ghcr.io/ruitaodong/one-kvm-armv6-dev:latest` (plus `:<commit>` and, when
+publishing a release, `:<tag>`). Locally you can reuse its layers:
 
 ```sh
-CACHE_FROM=ghcr.io/ruitaodong/one-kvm-armv6-dev:trixie ./scripts/build-armv6.sh
+CACHE_FROM=ghcr.io/ruitaodong/one-kvm-armv6-dev:latest ./scripts/build-armv6.sh
 # or use it directly
-docker run --rm -it --platform linux/arm/v6 -v "$PWD":/src ghcr.io/ruitaodong/one-kvm-armv6-dev:trixie
+docker run --rm -it --platform linux/arm/v6 -v "$PWD":/src ghcr.io/ruitaodong/one-kvm-armv6-dev
 ```
 
 New GHCR packages are private; make it public under the package's settings
 if others should pull it.
 
-GitHub's `ubuntu-24.04-arm` runners can't run 32-bit ARM code, so the
-workflow detects that and runs the same container under QEMU. That is slow:
-the first build may take hours. Caches (build image, crates, `target/`) are
-saved even if the build step times out, so just re-run the workflow and it
-continues. A self-hosted Ampere A1 runner (below) builds natively in a
-fraction of the time.
+GitHub's `ubuntu-24.04-arm` runners (Neoverse N2) run 32-bit ARM code
+natively, so the container needs no QEMU there. The workflow checks this
+first and falls back to QEMU (much slower) on a runner that can't. The Cargo
+cache is saved even if the build step times out, so a re-run continues.
 
 ### Oracle Cloud (Always Free Ampere A1)
 
@@ -118,8 +117,8 @@ fraction of the time.
 
 ```sh
 sudo apt update
-sudo apt install ./one-kvm_*_armhf-armv6-trixie.deb     # also pulls in FFmpeg libs
-ldd /usr/bin/one-kvm | grep -E 'avcodec|not found'        # resolved, nothing "not found"
+sudo apt install ./one-kvm_*_armhf-armv6.deb
+ldd /usr/bin/one-kvm | grep 'not found'      # prints nothing
 ```
 
 USB OTG: `dtoverlay=dwc2,dr_mode=peripheral` in `config.txt` and no other USB
@@ -130,7 +129,6 @@ One-KVM creates its own gadget.
 
 - Release builds use thin LTO: rustc runs as a 32-bit program here and
   One-KVM's full LTO may not fit in 4 GB.
-- The build prints the binary's `Tag_CPU_arch`. Crypto libraries include NEON
-  code that is only used when the CPU has NEON, which can label the binary
-  v7/NEON; that's expected. Everything else is compiled by Raspberry Pi OS's
-  ARMv6 compiler.
+- Crypto libraries include NEON code that is only used when the CPU has NEON,
+  which can label the binary v7/NEON in `readelf -A`; that's expected.
+  Everything else is compiled for ARMv6.

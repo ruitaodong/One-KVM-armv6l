@@ -48,7 +48,7 @@ package_arch() {
     fi
 
     local PKG_DIR="/tmp/one-kvm-pkg-$$"
-    # DEB_NAME_SUFFIX tells otherwise identical armhf packages apart (e.g. -armv6-trixie)
+    # DEB_NAME_SUFFIX tells otherwise identical armhf packages apart (e.g. -armv6)
     local DEB_PATH="$OUTPUT_DIR/one-kvm_${VERSION}_${DEB_ARCH}${DEB_NAME_SUFFIX:-}.deb"
 
     # Create package structure
@@ -130,16 +130,13 @@ EOF
     chmod 755 "$PKG_DIR/DEBIAN/prerm"
 
     # Create control file
-    BASE_DEPS="libc6 (>= 2.36), libgcc-s1, libstdc++6, libasound2t64 (>= 1.1) | libasound2 (>= 1.1), libdrm2 (>= 2.4), libudev1"
+    # DEPENDS replaces the default list (e.g. the ARMv6 build passes what dpkg-shlibdeps found)
+    BASE_DEPS="${DEPENDS:-libc6 (>= 2.36), libgcc-s1, libstdc++6, libasound2t64 (>= 1.1) | libasound2 (>= 1.1), libdrm2 (>= 2.4), libudev1}"
     # libmfx.so.1 is provided by libmfx1; libmfx-gen has a different SONAME.
     AMD64_DEPS="libva2 (>= 2.0), libva-drm2 (>= 2.10), libva-x11-2 (>= 2.10), libmfx1 (>= 21.1), libx11-6 (>= 1.6), libxcb1 (>= 1.14), i965-va-driver-shaders (>= 2.4), intel-media-va-driver-non-free (>= 21.1)"
     DEPS="$BASE_DEPS"
     if [ "$DEB_ARCH" = "amd64" ]; then
         DEPS="$DEPS, $AMD64_DEPS"
-    fi
-    # EXTRA_DEPS: e.g. the distro FFmpeg libraries an ARMv6 build links dynamically
-    if [ -n "${EXTRA_DEPS:-}" ]; then
-        DEPS="$DEPS, $EXTRA_DEPS"
     fi
 
     cat > "$PKG_DIR/DEBIAN/control" <<EOF

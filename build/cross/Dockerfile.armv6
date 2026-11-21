@@ -1,48 +1,43 @@
 # syntax=docker/dockerfile:1
-# One-KVM ARMv6 build environment (Raspberry Pi Zero / Zero W / Pi 1)
+# One-KVM ARMv6 build environment (Raspberry Pi Zero / Zero W / Pi 1, Raspberry Pi OS 13 "trixie")
 #
-# A linux/arm/v6 Raspbian (Raspberry Pi OS armhf) image with gcc, Rust and the
-# libraries One-KVM needs. It runs NATIVELY on an arm64 host that can execute
-# 32-bit ARM code (Oracle Cloud Ampere A1, Pi 4/400 on a 64-bit OS): no cross
-# compiler, no QEMU. Everything is built inside it exactly as on a Pi, and the
-# compilers produce ARMv6 code by default. On hosts whose CPU has no 32-bit
-# mode (GitHub's ubuntu-24.04-arm runners, Graviton 3+, x86) the same image
-# runs under QEMU user emulation (binfmt): same result, much slower.
+# A linux/arm/v6 Raspbian image with gcc, Rust and the libraries One-KVM
+# needs. It runs natively on an arm64 host that can execute 32-bit ARM code
+# (GitHub's ubuntu-24.04-arm runners, Oracle Cloud Ampere A1, Pi 4/400 on a
+# 64-bit OS): no cross compiler, no QEMU, and the compilers produce ARMv6
+# code by default. On hosts without a 32-bit ARM mode (Graviton 3+, x86) the
+# same image runs under QEMU user emulation: same result, much slower.
 #
-#   docker build --platform linux/arm/v6 -t onekvm-armv6:trixie -f build/cross/Dockerfile.armv6 build/cross
-#   docker run --rm -it --platform linux/arm/v6 -v "$PWD":/src onekvm-armv6:trixie
+#   docker build --platform linux/arm/v6 -t onekvm-armv6 -f build/cross/Dockerfile.armv6 build/cross
+#   docker run --rm -it --platform linux/arm/v6 -v "$PWD":/src onekvm-armv6
 #     (in the container: cargo build --release)
-#
-# Bookworm (Raspberry Pi OS 12): --build-arg SUITE=bookworm
 #
 # Base: tianon/raspbian, a minimal Raspbian image built from the Raspbian
 # archive by Tianon Gravi (maintainer of Docker's official Debian images).
+# It is arm/v6-only; the platform comes from docker build --platform.
+FROM tianon/raspbian:trixie-slim
 
-# The platform comes from the build command (docker build --platform
-# linux/arm/v6), not from FROM: tianon/raspbian is arm/v6-only, so building
-# without it fails with "no match for platform" instead of picking another.
-ARG SUITE=trixie
-FROM tianon/raspbian:${SUITE}-slim
-
+ARG FFMPEG_VERSION=n7.1.1
 ARG LIBJPEG_TURBO_VERSION=3.1.4.1
 ARG LIBYUV_REV=957f295ea946cbbd13fcfc46e7066f2efa801233
+ARG RUSTUP_TIMEOUT=30m
 
-# Compilers and the -dev packages (FFmpeg, ALSA, udev, ... from Raspbian itself).
-# No curl or git: sources and rustup-init are fetched with ADD.
+# Compilers and -dev packages. No FFmpeg from Raspbian: its libavcodec pulls
+# in VAAPI, VDPAU, x264, x265, dav1d, ... on the Pi; a minimal one is built
+# below. No curl or git: sources and rustup-init are fetched with ADD.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
         build-essential pkg-config cmake ca-certificates xz-utils util-linux \
         clang libclang-dev \
-        libasound2-dev libudev-dev libv4l-dev libdrm-dev \
-        libavcodec-dev libavutil-dev libopus-dev zlib1g-dev \
+        libasound2-dev libudev-dev libdrm-dev libopus-dev zlib1g-dev \
     && rm -rf /var/lib/apt/lists/*
 
 # On a 64-bit kernel uname reports "aarch64" even to 32-bit programs, which
 # misleads cmake/configure. linux32 makes it report a 32-bit ARM machine
 # (armv8l); the code built is still ARMv6, as the compilers default to it.
-# Under QEMU, uname already reports armv7l, and linux32 itself fails on CPUs
-# without 32-bit support (personality(PER_LINUX32) -> EINVAL), so arm32 uses
-# linux32 only where it works.
+# Under QEMU uname already says armv7l, and linux32 itself fails on CPUs
+# without 32-bit support (personality(PER_LINUX32) -> EINVAL), so arm32
+# uses linux32 only where it works.
 RUN printf '%s\n' '#!/bin/sh' \
         'if linux32 true 2>/dev/null; then exec linux32 "$@"; fi' \
         'exec "$@"' > /usr/local/bin/arm32 \
@@ -59,6 +54,25 @@ ENTRYPOINT ["/usr/local/bin/arm32"]
 # goes straight to the kernel, which accepts both layouts).
 ENV LANG=C.UTF-8 \
     PATH=/root/.cargo/bin:$PATH
+
+# Minimal static FFmpeg: libavcodec + libavutil with only the V4L2 M2M H.264
+# encoder (the Pi's bcm2835-codec). --disable-autodetect keeps out VAAPI,
+# VDPAU, DRM, zlib, ...; the result needs nothing but libc/libm/libatomic.
+# One-KVM's other encoders (HEVC, VP8/9, VAAPI, x264) then just fail its
+# runtime probe. LGPL build, no NEON (ARMv6 has none).
+ADD https://github.com/FFmpeg/FFmpeg.git#${FFMPEG_VERSION} /tmp/ffmpeg
+RUN cd /tmp/ffmpeg \
+    && ./configure --prefix=/opt/ffmpeg \
+        --arch=arm --cpu=arm1176jzf-s --disable-neon --disable-vfpv3 --disable-armv6t2 \
+        --enable-static --disable-shared --enable-pic \
+        --disable-programs --disable-doc --disable-debug --disable-network \
+        --disable-autodetect --disable-everything \
+        --disable-avformat --disable-avdevice --disable-avfilter \
+        --disable-swscale --disable-swresample \
+        --enable-v4l2-m2m --enable-encoder=h264_v4l2m2m \
+    && grep -q 'CONFIG_H264_V4L2M2M_ENCODER 1' config_components.h \
+    && make -j"$(nproc)" install \
+    && rm -rf /tmp/ffmpeg
 
 # libjpeg-turbo 3.x (One-KVM needs the TurboJPEG 3 API; Raspbian has 2.1).
 # No SIMD: its 32-bit ARM SIMD code is NEON, which ARMv6 doesn't have.
@@ -83,11 +97,9 @@ RUN cd /tmp/yuv \
     && rm -rf /tmp/yuv
 
 # Rust with an ARMv6 host toolchain. Last of the build steps: Docker
-# re-checks the URL on each build, so a new rustup-init release only
-# re-runs this step. rustup's own downloader is used (its curl backend is
-# deprecated); -v logs each download, and a stalled attempt is killed
-# after RUSTUP_TIMEOUT (unpacking is slow under QEMU) and retried, up to 3 times.
-ARG RUSTUP_TIMEOUT=30m
+# re-checks the URL on each build, so a new rustup-init release only re-runs
+# this step. A stalled attempt is killed after RUSTUP_TIMEOUT (unpacking is
+# slow under QEMU) and retried, up to 3 times.
 ADD --chmod=755 https://static.rust-lang.org/rustup/dist/arm-unknown-linux-gnueabihf/rustup-init /tmp/rustup-init
 RUN for i in 1 2 3; do \
         timeout "$RUSTUP_TIMEOUT" /tmp/rustup-init -y -v --profile minimal \
@@ -98,20 +110,22 @@ RUN for i in 1 2 3; do \
     && rm /tmp/rustup-init \
     && rustc --version && cargo --version
 
-# ONE_KVM_LIBS_PATH: libyuv is found here. It has no libavcodec.a, so hwcodec
-# falls back to pkg-config and links Raspbian's shared FFmpeg.
+# FFMPEG_STATIC + PKG_CONFIG_PATH: hwcodec links the minimal FFmpeg above
+# statically (via pkg-config). ONE_KVM_LIBS_PATH: libyuv is found here.
 # Thin LTO: rustc is a 32-bit program here (max 4 GB address space), and
 # One-KVM's default full LTO with one codegen unit may not fit.
 # --allow-multiple-definition: libjpeg.a (for libyuv) and libturbojpeg.a
 # both contain the libjpeg functions; upstream One-KVM links with it too.
-ENV ONE_KVM_LIBS_PATH=/usr/local \
+ENV PKG_CONFIG_PATH=/opt/ffmpeg/lib/pkgconfig \
+    FFMPEG_STATIC=1 \
+    ONE_KVM_LIBS_PATH=/usr/local \
     LIBYUV_STATIC=1 \
     CARGO_PROFILE_RELEASE_LTO=thin \
     RUSTFLAGS="-C link-arg=-Wl,--allow-multiple-definition"
 
 ARG SOURCE_URL=https://github.com/ruitaodong/One-KVM-armv6l
 LABEL org.opencontainers.image.source="${SOURCE_URL}" \
-      org.opencontainers.image.description="One-KVM ARMv6 build environment (Raspberry Pi OS armhf, gcc, Rust, libjpeg-turbo 3, libyuv)"
+      org.opencontainers.image.description="One-KVM ARMv6 build environment (Raspberry Pi OS trixie armhf: gcc, Rust, minimal FFmpeg with h264_v4l2m2m, libjpeg-turbo 3, libyuv)"
 
 WORKDIR /src
 CMD ["bash"]

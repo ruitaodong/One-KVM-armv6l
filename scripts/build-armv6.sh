@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-# Build One-KVM for ARMv6 (Raspberry Pi Zero / Zero W / Pi 1).
+# Build One-KVM for ARMv6 (Raspberry Pi Zero / Zero W / Pi 1, Raspberry Pi OS 13 "trixie").
 #
-# No cross-compiling: a linux/arm/v6 container (Raspberry Pi OS armhf) runs
-# directly on an arm64 host whose CPU executes 32-bit ARM code (Oracle Cloud
-# Ampere A1, a Pi 4/400 with a 64-bit OS) and builds One-KVM there with its
-# own native gcc and rustc, as on a Pi. Check the host:
+# No cross-compiling: a linux/arm/v6 Raspbian container runs directly on an
+# arm64 host whose CPU executes 32-bit ARM code (GitHub's ubuntu-24.04-arm
+# runners, Oracle Cloud Ampere A1, a Pi 4/400 with a 64-bit OS) and builds
+# One-KVM there with its own native gcc and rustc, as on a Pi. Check the host:
 #   docker run --rm --platform linux/arm/v7 debian:trixie linux32 uname -m   -> armv8l
-# Other hosts (GitHub's ubuntu-24.04-arm runners, x86) work too once QEMU
+# Other hosts (x86, Graviton 3+) work too once QEMU
 # binfmt for arm is registered, e.g.
 #   docker run --privileged --rm tonistiigi/binfmt --install arm
 # but the build is several times slower.
@@ -14,41 +14,34 @@
 #
 # Usage: scripts/build-armv6.sh [build|image|shell]
 #   build  (default) build the image if needed, compile, package the .deb
-#   image  only build/update the reusable build environment onekvm-armv6:<suite>
+#   image  only build/update the reusable build environment image
 #   shell  interactive shell in the build container, repo mounted at /src
 #
-#   SUITE=trixie|bookworm  Raspberry Pi OS release on the Pi (default trixie)
-#   JOBS=N                 limit parallel compile jobs
-#   CACHE=dir              Cargo downloads + build cache (default ~/.cache/onekvm-armv6/<suite>)
-#   OUT_DIR=dir            where the .deb goes (default ./dist)
-#   IMAGE=name:tag         name of the build environment image (default onekvm-armv6:<suite>)
-#   CACHE_FROM=ref         registry image to reuse layers from, e.g.
-#                          ghcr.io/ruitaodong/one-kvm-armv6-dev:trixie
+#   JOBS=N          limit parallel compile jobs
+#   CACHE=dir       Cargo downloads + build cache (default ~/.cache/onekvm-armv6)
+#   OUT_DIR=dir     where the .deb goes (default ./dist)
+#   IMAGE=name:tag  build environment image name (default onekvm-armv6:latest)
+#   CACHE_FROM=ref  registry image to reuse layers from, e.g.
+#                   ghcr.io/ruitaodong/one-kvm-armv6-dev:latest
 set -euo pipefail
 cd "$(dirname "$0")/.."
 ROOT=$PWD
 MODE=${1:-build}
 
-SUITE=${SUITE:-trixie}
-case "$SUITE" in
-    trixie|bookworm) ;;
-    *) echo "SUITE must be trixie or bookworm" >&2; exit 1 ;;
-esac
-IMAGE=${IMAGE:-onekvm-armv6:$SUITE}
-PLATFORM=linux/arm/v6   # what the image is; it runs natively, no QEMU
+IMAGE=${IMAGE:-onekvm-armv6:latest}
+PLATFORM=linux/arm/v6
 OUT_DIR=${OUT_DIR:-$ROOT/dist}
-CACHE=${CACHE:-$HOME/.cache/onekvm-armv6/$SUITE}
+CACHE=${CACHE:-$HOME/.cache/onekvm-armv6}
 OWNER="$(id -u):$(id -g)"
 mkdir -p "$OUT_DIR" "$CACHE/registry" "$CACHE/git" "$CACHE/target"
 step() { printf '\n==> %s\n' "$*"; }
 
-# The build environment: build/cross/Dockerfile.armv6 (Docker caches the layers).
-# The image carries inline cache metadata, so an existing copy (e.g. restored
-# with docker load in CI) is reused as layer cache instead of rebuilding.
+# The build environment (Docker caches the layers). The image carries inline
+# cache metadata, so a pulled copy (CACHE_FROM) is reused as layer cache.
 toolchain_image() {
     step "Building build environment $IMAGE"
     docker build --platform "$PLATFORM" -f build/cross/Dockerfile.armv6 \
-        --build-arg SUITE="$SUITE" --build-arg BUILDKIT_INLINE_CACHE=1 \
+        --build-arg BUILDKIT_INLINE_CACHE=1 \
         --cache-from "$IMAGE" ${CACHE_FROM:+--cache-from "$CACHE_FROM"} \
         -t "$IMAGE" build/cross
 }
@@ -56,7 +49,7 @@ toolchain_image() {
 # Frontend (embedded into the binary from web/dist)
 web() {
     step "Building web frontend"
-    docker run --rm -v "$ROOT/web":/web -w /web node:24-bookworm-slim sh -euc "
+    docker run --rm -v "$ROOT/web":/web -w /web node:24-slim sh -euc "
         npm ci --no-audit --no-fund && npm run build
         chown -R $OWNER /web/dist /web/node_modules"
 }
@@ -69,7 +62,7 @@ in_container() {
         -v "$CACHE/registry":/root/.cargo/registry \
         -v "$CACHE/git":/root/.cargo/git \
         -v "$OUT_DIR":/out \
-        -e SUITE="$SUITE" -e OWNER="$OWNER" ${JOBS:+-e CARGO_BUILD_JOBS="$JOBS"} \
+        -e OWNER="$OWNER" ${JOBS:+-e CARGO_BUILD_JOBS="$JOBS"} \
         "$IMAGE" bash -euo pipefail -c "$CMD"
 }
 FIX_OWNER='chown -R "$OWNER" /out /src/target /root/.cargo/registry /root/.cargo/git 2>/dev/null || true'
@@ -78,12 +71,11 @@ case "$MODE" in
 image)
     toolchain_image
     step "Toolchain check"
-    docker image inspect --format 'image platform: {{.Os}}/{{.Architecture}}/{{.Variant}}' "$IMAGE"
     docker run --rm --platform "$PLATFORM" "$IMAGE" bash -c '
-        # a 64-bit kernel reports 32-bit processes as armv8l; the code is ARMv6
         echo "uname -m: $(uname -m)   gcc: $(gcc -dumpmachine)"
         gcc -Q --help=target | grep -E "^ +-m(arch|fpu|float-abi)=" | tr -s " "
-        rustc -vV | grep -E "^(release|host)"'
+        rustc -vV | grep -E "^(release|host)"
+        echo "libavcodec $(pkg-config --modversion libavcodec) (static, h264_v4l2m2m only)"'
     docker image ls "${IMAGE%%:*}"
     ;;
 shell)
@@ -103,17 +95,16 @@ build)
         T=arm-unknown-linux-gnueabihf
         mkdir -p target/$T/release && cp "$BIN" target/$T/release/   # where package-deb.sh looks
 
-        # Informational: runtime-detected NEON code (e.g. in crypto libraries)
-        # can mark the binary v7/NEON even though it never runs on a Pi Zero.
-        readelf -A "$BIN" | grep -E "Tag_CPU_arch:|Tag_Advanced_SIMD_arch" || true
+        echo "Linked shared libraries:"; readelf -d "$BIN" | grep NEEDED
+        # Depends: exactly the Raspbian packages providing those libraries
+        D=$(mktemp -d); mkdir "$D/debian"
+        printf "Source: one-kvm\n\nPackage: one-kvm\nArchitecture: armhf\n" > "$D/debian/control"
+        DEPENDS=$(cd "$D" && dpkg-shlibdeps -O "/src/$BIN" | sed -n "s/^shlibs:Depends=//p")
+        echo "Depends: $DEPENDS"
 
-        # The FFmpeg libraries it links (libavcodecNN, libavutilNN) become Depends
-        FF_DEPS=$(readelf -d "$BIN" \
-            | sed -n "s/.*Shared library: \[lib\(avcodec\|avutil\)\.so\.\([0-9]*\)\].*/lib\1\2/p" \
-            | paste -sd, - | sed "s/,/, /g")
-        OUTPUT_DIR=/out EXTRA_DEPS="$FF_DEPS" DEB_NAME_SUFFIX="-armv6-$SUITE" \
+        OUTPUT_DIR=/out DEPENDS="$DEPENDS" DEB_NAME_SUFFIX=-armv6 \
             bash build/package-deb.sh $T
-        cp "$BIN" "/out/one-kvm-armv6-$SUITE"
+        cp "$BIN" /out/one-kvm-armv6
         '"$FIX_OWNER" in_container
     step "Done"
     ls -la "$OUT_DIR"

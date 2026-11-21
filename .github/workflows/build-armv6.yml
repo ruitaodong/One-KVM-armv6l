@@ -1,28 +1,22 @@
 name: Build ARMv6 (Pi Zero / Zero W)
 
 # Runs scripts/build-armv6.sh, which compiles One-KVM natively inside a
-# Raspberry Pi OS armhf (linux/arm/v6) container, pushes that build
-# environment (dev) image to GHCR as ghcr.io/<owner>/one-kvm-armv6-dev:<suite>,
-# and attaches the .deb packages to a GitHub Release.
+# Raspberry Pi OS trixie armhf (linux/arm/v6) container, pushes that build
+# environment (dev) image to GHCR as ghcr.io/<owner>/one-kvm-armv6-dev, and
+# attaches the .deb to a GitHub Release.
 #
-# GitHub's ubuntu-24.04-arm runners have no 32-bit ARM mode, so there the
-# container runs under QEMU (slow: the first build can take several hours).
-# Caches are saved even when the build step times out, so re-running the
-# workflow continues where it stopped. A self-hosted Oracle Cloud Ampere A1
-# runner runs it natively and much faster.
+# GitHub's ubuntu-24.04-arm runners (Azure Cobalt 100, Neoverse N2) run
+# 32-bit ARM code natively, so no QEMU is needed. If a runner can't, QEMU is
+# set up instead (much slower). The Cargo cache is saved even when the build
+# step times out, so re-running the workflow continues where it stopped.
 on:
   push:
     tags:
       - "*"
   workflow_dispatch:
     inputs:
-      suite:
-        description: Raspberry Pi OS release on the Pi (must match)
-        type: choice
-        options: [trixie, bookworm, both]
-        default: trixie
       runner:
-        description: "ubuntu-24.04-arm (GitHub, QEMU) or self-hosted (e.g. an OCI Ampere A1 VM)"
+        description: "ubuntu-24.04-arm (GitHub) or self-hosted (e.g. an OCI Ampere A1 VM)"
         type: choice
         options: [ubuntu-24.04-arm, self-hosted]
         default: ubuntu-24.04-arm
@@ -39,35 +33,17 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  setup:
-    runs-on: ubuntu-latest
-    outputs:
-      suites: ${{ steps.m.outputs.suites }}
-    steps:
-      - id: m
-        env:
-          SUITE: ${{ inputs.suite }}
-        run: |
-          case "${SUITE:-both}" in
-            both) echo 'suites=["trixie","bookworm"]' >> "$GITHUB_OUTPUT" ;;
-            *)    echo "suites=[\"${SUITE}\"]" >> "$GITHUB_OUTPUT" ;;
-          esac
-
   build:
-    needs: setup
     runs-on: ${{ inputs.runner || 'ubuntu-24.04-arm' }}
     timeout-minutes: 360
-    strategy:
-      fail-fast: false
-      matrix:
-        suite: ${{ fromJSON(needs.setup.outputs.suites) }}
     permissions:
-      contents: read
-      packages: write
+      contents: write   # GitHub Release
+      packages: write   # GHCR dev image
     env:
-      SUITE: ${{ matrix.suite }}
-      IMAGE: onekvm-armv6:${{ matrix.suite }}
-      CACHE: ${{ github.workspace }}/../armv6-cache/${{ matrix.suite }}
+      IMAGE: onekvm-armv6:latest
+      CACHE: ${{ github.workspace }}/../armv6-cache
+      # the release this run publishes to, if any
+      TAG_NAME: ${{ inputs.release_tag || (startsWith(github.ref, 'refs/tags/') && github.ref_name || '') }}
     steps:
       - uses: actions/checkout@v4
 
@@ -75,8 +51,8 @@ jobs:
         run: |
           DEV_IMAGE="ghcr.io/$(echo "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')/one-kvm-armv6-dev"
           echo "DEV_IMAGE=${DEV_IMAGE}" >> "$GITHUB_ENV"
-          # Layers are reused from the last pushed image (an absent one is skipped)
-          echo "CACHE_FROM=${DEV_IMAGE}:${SUITE}" >> "$GITHUB_ENV"
+          # layers are reused from the last pushed image (skipped if there is none)
+          echo "CACHE_FROM=${DEV_IMAGE}:latest" >> "$GITHUB_ENV"
 
       - name: Log in to GHCR
         uses: docker/login-action@v3
@@ -103,45 +79,37 @@ jobs:
         with:
           platforms: arm
 
-      - name: Verify the linux/arm/v6 platform runs
-        run: docker run --rm --platform linux/arm/v6 tianon/raspbian:${SUITE}-slim uname -m
-
-      # Build environment (dev) image: gcc, Rust, libjpeg-turbo 3, libyuv.
-      # Slow to build under QEMU, so it reuses the layers of the image last
-      # pushed to GHCR (CACHE_FROM) and is pushed again right away, before
-      # the long compile.
+      # Build environment (dev) image. Pushed right away, before the long
+      # compile, so it is published (and cached for the next run) even if
+      # the compile times out.
       - name: Build environment (dev) image
         run: ./scripts/build-armv6.sh image
 
       - name: Push dev image to GHCR
-        env:
-          # the release this run publishes to, if any
-          TAG_NAME: ${{ inputs.release_tag || (startsWith(github.ref, 'refs/tags/') && github.ref_name || '') }}
         run: |
-          tags=("${DEV_IMAGE}:${SUITE}" "${DEV_IMAGE}:${SUITE}-${GITHUB_SHA::7}")
+          tags=("${DEV_IMAGE}:latest" "${DEV_IMAGE}:${GITHUB_SHA::7}")
           if [ -n "${TAG_NAME}" ]; then
-            tags+=("${DEV_IMAGE}:${SUITE}-$(printf '%s' "${TAG_NAME}" | tr -c 'A-Za-z0-9_.-' '-')")
+            tags+=("${DEV_IMAGE}:$(printf '%s' "${TAG_NAME}" | tr -c 'A-Za-z0-9_.-' '-')")
           fi
           for t in "${tags[@]}"; do
             docker tag "${IMAGE}" "$t"
             docker push "$t"
           done
-          echo "### Dev image" >> "$GITHUB_STEP_SUMMARY"
-          printf -- '- `%s`\n' "${tags[@]}" >> "$GITHUB_STEP_SUMMARY"
+          { echo "### Dev image"; printf -- '- `%s`\n' "${tags[@]}"; } >> "$GITHUB_STEP_SUMMARY"
 
-      # Cargo registry/git + target dir. A new key every run so a run that
+      # Cargo registry/git + target dir. A new key every run, so a run that
       # timed out still saves its progress for the next one.
       - name: Restore Cargo cache
         uses: actions/cache/restore@v4
         with:
           path: ${{ env.CACHE }}
-          key: armv6-cargo-${{ matrix.suite }}-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: armv6-cargo-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}-${{ github.run_attempt }}
           restore-keys: |
-            armv6-cargo-${{ matrix.suite }}-${{ hashFiles('Cargo.lock') }}-
-            armv6-cargo-${{ matrix.suite }}-
+            armv6-cargo-${{ hashFiles('Cargo.lock') }}-
+            armv6-cargo-
 
-      # Downloading and unpacking crates natively is much faster than under
-      # QEMU; the registry layout doesn't depend on the architecture.
+      # Fetch crates with the host's cargo (fast, and much faster than under
+      # QEMU); the registry layout doesn't depend on the architecture.
       - name: Prefetch crates on the host
         run: |
           mkdir -p "${CACHE}/registry" "${CACHE}/git" "${CACHE}/target"
@@ -160,58 +128,42 @@ jobs:
         uses: actions/cache/save@v4
         with:
           path: ${{ env.CACHE }}
-          key: armv6-cargo-${{ matrix.suite }}-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}-${{ github.run_attempt }}
+          key: armv6-cargo-${{ hashFiles('Cargo.lock') }}-${{ github.run_id }}-${{ github.run_attempt }}
 
       - name: Checksums
+        working-directory: dist
         run: |
-          cd dist
-          ls -la
-          sha256sum *.deb "one-kvm-armv6-${SUITE}" > "SHA256SUMS-armv6-${SUITE}"
-          cat "SHA256SUMS-armv6-${SUITE}"
+          sha256sum *.deb one-kvm-armv6 > SHA256SUMS
+          cat SHA256SUMS
 
       - uses: actions/upload-artifact@v4
         with:
-          name: one-kvm-armv6-${{ matrix.suite }}
+          name: one-kvm-armv6
           path: dist/
           if-no-files-found: error
 
-  release:
-    needs: build
-    if: startsWith(github.ref, 'refs/tags/') || inputs.release_tag != ''
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          pattern: one-kvm-armv6-*
-          path: dist
-          merge-multiple: true
-
-      - run: ls -la dist
-
       - name: Publish GitHub Release
+        if: env.TAG_NAME != ''
         uses: softprops/action-gh-release@v2
         with:
-          tag_name: ${{ inputs.release_tag || github.ref_name }}
+          tag_name: ${{ env.TAG_NAME }}
           target_commitish: ${{ github.sha }}
           generate_release_notes: true
           fail_on_unmatched_files: true
           body: |
             ### One-KVM for Raspberry Pi Zero / Zero W / Pi 1 (ARMv6)
 
-            Pick the package that matches the Pi's Raspberry Pi OS release
-            (`grep VERSION_CODENAME /etc/os-release`): `-armv6-trixie` (13) or
-            `-armv6-bookworm` (12).
+            For Raspberry Pi OS 13 (trixie). H.264 is encoded by the Pi's
+            hardware encoder (bcm2835-codec); CSI capture (e.g. TC358743, UYVY)
+            goes to it without color conversion.
 
             ```sh
             sudo apt update
-            sudo apt install ./one-kvm_*_armhf-armv6-trixie.deb
+            sudo apt install ./one-kvm_*_armhf-armv6.deb
             ```
 
-            Build environment (dev) image, `linux/arm/v6`:
-            `ghcr.io/${{ github.repository_owner }}/one-kvm-armv6-dev:<suite>-${{ inputs.release_tag || github.ref_name }}`
+            Build environment image (`linux/arm/v6`): `${{ env.DEV_IMAGE }}:${{ env.TAG_NAME }}`
           files: |
             dist/*.deb
-            dist/one-kvm-armv6-*
-            dist/SHA256SUMS-armv6-*
+            dist/one-kvm-armv6
+            dist/SHA256SUMS
