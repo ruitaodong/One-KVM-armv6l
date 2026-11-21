@@ -11,7 +11,7 @@
 #   docker run --rm -it --platform linux/arm/v6 -v "$PWD":/src onekvm-armv6:trixie
 #     (in the container: cargo build --release)
 #
-# Bookworm (Raspberry Pi OS 12): --build-arg SUITE=bookworm --build-arg TIME_BITS=32
+# Bookworm (Raspberry Pi OS 12): --build-arg SUITE=bookworm
 #
 # Base: tianon/raspbian, a minimal Raspbian image built from the Raspbian
 # archive by Tianon Gravi (maintainer of Docker's official Debian images).
@@ -22,8 +22,6 @@
 ARG SUITE=trixie
 FROM tianon/raspbian:${SUITE}-slim
 
-# 64 on trixie (Raspberry Pi OS 13 armhf uses 64-bit time_t), 32 on bookworm
-ARG TIME_BITS=64
 ARG LIBJPEG_TURBO_VERSION=3.1.4.1
 ARG LIBYUV_REV=957f295ea946cbbd13fcfc46e7066f2efa801233
 
@@ -43,13 +41,15 @@ RUN apt-get update \
 SHELL ["linux32", "/bin/bash", "-euo", "pipefail", "-c"]
 ENTRYPOINT ["linux32"]
 
-# Match the distro's time_t/off_t ABI in everything compiled here (C, C++,
-# bindgen and Rust's libc crate)
+# time_t: everything built here uses glibc's default 32-bit time_t, like the
+# Rust ecosystem does on 32-bit ARM (libc crate, nix, socket2, v4l2r...).
+# Forcing 64-bit time_t only in parts of the build makes them disagree with
+# each other (E0308 in socket2, v4l2r). Raspbian trixie's own libraries use
+# 64-bit time_t, but glibc keeps the 32-bit functions and One-KVM passes no
+# time_t structs to those libraries (its ALSA calls use no timestamps; V4L2
+# goes straight to the kernel, which accepts both layouts).
 ENV LANG=C.UTF-8 \
-    PATH=/root/.cargo/bin:$PATH \
-    CFLAGS="-D_FILE_OFFSET_BITS=64 -D_TIME_BITS=${TIME_BITS}" \
-    CXXFLAGS="-D_FILE_OFFSET_BITS=64 -D_TIME_BITS=${TIME_BITS}" \
-    BINDGEN_EXTRA_CLANG_ARGS="-D_FILE_OFFSET_BITS=64 -D_TIME_BITS=${TIME_BITS}"
+    PATH=/root/.cargo/bin:$PATH
 
 # libjpeg-turbo 3.x (One-KVM needs the TurboJPEG 3 API; Raspbian has 2.1).
 # No SIMD: its 32-bit ARM SIMD code is NEON, which ARMv6 doesn't have.
@@ -68,8 +68,8 @@ RUN cd /tmp/yuv \
     && cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local \
         -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
         -DJPEG_INCLUDE_DIR=/usr/local/include -DJPEG_LIBRARY=/usr/local/lib/libjpeg.a \
-        -DCMAKE_C_FLAGS="$CFLAGS -DHAVE_JPEG -DLIBYUV_DISABLE_NEON" \
-        -DCMAKE_CXX_FLAGS="$CXXFLAGS -DHAVE_JPEG -DLIBYUV_DISABLE_NEON" \
+        -DCMAKE_C_FLAGS="-DHAVE_JPEG -DLIBYUV_DISABLE_NEON" \
+        -DCMAKE_CXX_FLAGS="-DHAVE_JPEG -DLIBYUV_DISABLE_NEON" \
     && make -C build -j"$(nproc)" install \
     && rm -rf /tmp/yuv
 
