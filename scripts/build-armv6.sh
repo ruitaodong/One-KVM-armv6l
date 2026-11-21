@@ -3,9 +3,13 @@
 #
 # No cross-compiling: a linux/arm/v6 container (Raspberry Pi OS armhf) runs
 # directly on an arm64 host whose CPU executes 32-bit ARM code (Oracle Cloud
-# Ampere A1, a Pi 4/400 with a 64-bit OS, GitHub arm64 runners) and builds
-# One-KVM there with its own native gcc and rustc, as on a Pi. Check the host:
+# Ampere A1, a Pi 4/400 with a 64-bit OS) and builds One-KVM there with its
+# own native gcc and rustc, as on a Pi. Check the host:
 #   docker run --rm --platform linux/arm/v7 debian:trixie linux32 uname -m   -> armv8l
+# Other hosts (GitHub's ubuntu-24.04-arm runners, x86) work too once QEMU
+# binfmt for arm is registered, e.g.
+#   docker run --privileged --rm tonistiigi/binfmt --install arm
+# but the build is several times slower.
 # Needs only Docker. The build environment is build/cross/Dockerfile.armv6.
 #
 # Usage: scripts/build-armv6.sh [build|image|shell]
@@ -17,6 +21,9 @@
 #   JOBS=N                 limit parallel compile jobs
 #   CACHE=dir              Cargo downloads + build cache (default ~/.cache/onekvm-armv6/<suite>)
 #   OUT_DIR=dir            where the .deb goes (default ./dist)
+#   IMAGE=name:tag         name of the build environment image (default onekvm-armv6:<suite>)
+#   CACHE_FROM=ref         registry image to reuse layers from, e.g.
+#                          ghcr.io/ruitaodong/one-kvm-armv6-dev:trixie
 set -euo pipefail
 cd "$(dirname "$0")/.."
 ROOT=$PWD
@@ -24,11 +31,10 @@ MODE=${1:-build}
 
 SUITE=${SUITE:-trixie}
 case "$SUITE" in
-    trixie)   TIME_BITS=64 ;;
-    bookworm) TIME_BITS=32 ;;
+    trixie|bookworm) ;;
     *) echo "SUITE must be trixie or bookworm" >&2; exit 1 ;;
 esac
-IMAGE=onekvm-armv6:$SUITE
+IMAGE=${IMAGE:-onekvm-armv6:$SUITE}
 PLATFORM=linux/arm/v6   # what the image is; it runs natively, no QEMU
 OUT_DIR=${OUT_DIR:-$ROOT/dist}
 CACHE=${CACHE:-$HOME/.cache/onekvm-armv6/$SUITE}
@@ -36,11 +42,15 @@ OWNER="$(id -u):$(id -g)"
 mkdir -p "$OUT_DIR" "$CACHE/registry" "$CACHE/git" "$CACHE/target"
 step() { printf '\n==> %s\n' "$*"; }
 
-# The build environment: build/cross/Dockerfile.armv6 (Docker caches the layers)
+# The build environment: build/cross/Dockerfile.armv6 (Docker caches the layers).
+# The image carries inline cache metadata, so an existing copy (e.g. restored
+# with docker load in CI) is reused as layer cache instead of rebuilding.
 toolchain_image() {
     step "Building build environment $IMAGE"
     docker build --platform "$PLATFORM" -f build/cross/Dockerfile.armv6 \
-        --build-arg SUITE="$SUITE" --build-arg TIME_BITS="$TIME_BITS" -t "$IMAGE" build/cross
+        --build-arg SUITE="$SUITE" --build-arg BUILDKIT_INLINE_CACHE=1 \
+        --cache-from "$IMAGE" ${CACHE_FROM:+--cache-from "$CACHE_FROM"} \
+        -t "$IMAGE" build/cross
 }
 
 # Frontend (embedded into the binary from web/dist)
@@ -74,7 +84,7 @@ image)
         echo "uname -m: $(uname -m)   gcc: $(gcc -dumpmachine)"
         gcc -Q --help=target | grep -E "^ +-m(arch|fpu|float-abi)=" | tr -s " "
         rustc -vV | grep -E "^(release|host)"'
-    docker image ls onekvm-armv6
+    docker image ls "${IMAGE%%:*}"
     ;;
 shell)
     toolchain_image

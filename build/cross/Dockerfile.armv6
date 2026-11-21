@@ -3,15 +3,17 @@
 #
 # A linux/arm/v6 Raspbian (Raspberry Pi OS armhf) image with gcc, Rust and the
 # libraries One-KVM needs. It runs NATIVELY on an arm64 host that can execute
-# 32-bit ARM code (Oracle Cloud Ampere A1, Pi 4/400 on a 64-bit OS, GitHub
-# arm64 runners): no cross compiler, no QEMU. Everything is built inside it
-# exactly as on a Pi, and the compilers produce ARMv6 code by default.
+# 32-bit ARM code (Oracle Cloud Ampere A1, Pi 4/400 on a 64-bit OS): no cross
+# compiler, no QEMU. Everything is built inside it exactly as on a Pi, and the
+# compilers produce ARMv6 code by default. On hosts whose CPU has no 32-bit
+# mode (GitHub's ubuntu-24.04-arm runners, Graviton 3+, x86) the same image
+# runs under QEMU user emulation (binfmt): same result, much slower.
 #
 #   docker build --platform linux/arm/v6 -t onekvm-armv6:trixie -f build/cross/Dockerfile.armv6 build/cross
 #   docker run --rm -it --platform linux/arm/v6 -v "$PWD":/src onekvm-armv6:trixie
 #     (in the container: cargo build --release)
 #
-# Bookworm (Raspberry Pi OS 12): --build-arg SUITE=bookworm --build-arg TIME_BITS=32
+# Bookworm (Raspberry Pi OS 12): --build-arg SUITE=bookworm
 #
 # Base: tianon/raspbian, a minimal Raspbian image built from the Raspbian
 # archive by Tianon Gravi (maintainer of Docker's official Debian images).
@@ -22,15 +24,14 @@
 ARG SUITE=trixie
 FROM tianon/raspbian:${SUITE}-slim
 
-# 64 on trixie (Raspberry Pi OS 13 armhf uses 64-bit time_t), 32 on bookworm
-ARG TIME_BITS=64
 ARG LIBJPEG_TURBO_VERSION=3.1.4.1
 ARG LIBYUV_REV=957f295ea946cbbd13fcfc46e7066f2efa801233
 
-# Compilers and the -dev packages (FFmpeg, ALSA, udev, ... from Raspbian itself)
+# Compilers and the -dev packages (FFmpeg, ALSA, udev, ... from Raspbian itself).
+# No curl or git: sources and rustup-init are fetched with ADD.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        build-essential pkg-config cmake git curl ca-certificates xz-utils util-linux \
+        build-essential pkg-config cmake ca-certificates xz-utils util-linux \
         clang libclang-dev \
         libasound2-dev libudev-dev libv4l-dev libdrm-dev \
         libavcodec-dev libavutil-dev libopus-dev zlib1g-dev \
@@ -39,47 +40,61 @@ RUN apt-get update \
 # On a 64-bit kernel uname reports "aarch64" even to 32-bit programs, which
 # misleads cmake/configure. linux32 makes it report a 32-bit ARM machine
 # (armv8l); the code built is still ARMv6, as the compilers default to it.
-SHELL ["linux32", "/bin/bash", "-euo", "pipefail", "-c"]
-ENTRYPOINT ["linux32"]
+# Under QEMU, uname already reports armv7l, and linux32 itself fails on CPUs
+# without 32-bit support (personality(PER_LINUX32) -> EINVAL), so arm32 uses
+# linux32 only where it works.
+RUN printf '%s\n' '#!/bin/sh' \
+        'if linux32 true 2>/dev/null; then exec linux32 "$@"; fi' \
+        'exec "$@"' > /usr/local/bin/arm32 \
+    && chmod 755 /usr/local/bin/arm32
+SHELL ["/usr/local/bin/arm32", "/bin/bash", "-euo", "pipefail", "-c"]
+ENTRYPOINT ["/usr/local/bin/arm32"]
 
-# Match the distro's time_t/off_t ABI in everything compiled here (C, C++,
-# bindgen and Rust's libc crate)
+# time_t: everything built here uses glibc's default 32-bit time_t, like the
+# Rust ecosystem does on 32-bit ARM (libc crate, nix, socket2, v4l2r...).
+# Forcing 64-bit time_t only in parts of the build makes them disagree with
+# each other (E0308 in socket2, v4l2r). Raspbian trixie's own libraries use
+# 64-bit time_t, but glibc keeps the 32-bit functions and One-KVM passes no
+# time_t structs to those libraries (its ALSA calls use no timestamps; V4L2
+# goes straight to the kernel, which accepts both layouts).
 ENV LANG=C.UTF-8 \
-    PATH=/root/.cargo/bin:$PATH \
-    CFLAGS="-D_FILE_OFFSET_BITS=64 -D_TIME_BITS=${TIME_BITS}" \
-    CXXFLAGS="-D_FILE_OFFSET_BITS=64 -D_TIME_BITS=${TIME_BITS}" \
-    BINDGEN_EXTRA_CLANG_ARGS="-D_FILE_OFFSET_BITS=64 -D_TIME_BITS=${TIME_BITS}" \
-    RUST_LIBC_UNSTABLE_GNU_TIME_BITS=${TIME_BITS}
+    PATH=/root/.cargo/bin:$PATH
 
 # libjpeg-turbo 3.x (One-KVM needs the TurboJPEG 3 API; Raspbian has 2.1).
 # No SIMD: its 32-bit ARM SIMD code is NEON, which ARMv6 doesn't have.
-RUN git clone -q --depth 1 --branch ${LIBJPEG_TURBO_VERSION} https://github.com/libjpeg-turbo/libjpeg-turbo.git /tmp/jpeg \
-    && cmake -S /tmp/jpeg -B /tmp/jpeg/build -DCMAKE_BUILD_TYPE=Release \
+ADD https://github.com/libjpeg-turbo/libjpeg-turbo.git#${LIBJPEG_TURBO_VERSION} /tmp/jpeg
+RUN cmake -S /tmp/jpeg -B /tmp/jpeg/build -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_INSTALL_PREFIX=/usr/local -DCMAKE_INSTALL_LIBDIR=lib \
         -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
         -DENABLE_SHARED=OFF -DENABLE_STATIC=ON -DWITH_SIMD=OFF \
     && make -C /tmp/jpeg/build -j"$(nproc)" install \
     && rm -rf /tmp/jpeg
 
-# libyuv at the revision upstream One-KVM uses (NEON paths compiled out)
-RUN git init -q /tmp/yuv && cd /tmp/yuv \
-    && git fetch -q --depth 1 https://github.com/lemenkov/libyuv ${LIBYUV_REV} && git checkout -q FETCH_HEAD \
+# libyuv at the revision upstream One-KVM uses (NEON paths compiled out).
+# Raspbian's own libyuv is too old (no RGB24ToNV12).
+ADD https://github.com/lemenkov/libyuv.git#${LIBYUV_REV} /tmp/yuv
+RUN cd /tmp/yuv \
     && cmake -B build -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX=/usr/local \
         -DCMAKE_POSITION_INDEPENDENT_CODE=ON \
         -DJPEG_INCLUDE_DIR=/usr/local/include -DJPEG_LIBRARY=/usr/local/lib/libjpeg.a \
-        -DCMAKE_C_FLAGS="$CFLAGS -DHAVE_JPEG -DLIBYUV_DISABLE_NEON" \
-        -DCMAKE_CXX_FLAGS="$CXXFLAGS -DHAVE_JPEG -DLIBYUV_DISABLE_NEON" \
+        -DCMAKE_C_FLAGS="-DHAVE_JPEG -DLIBYUV_DISABLE_NEON" \
+        -DCMAKE_CXX_FLAGS="-DHAVE_JPEG -DLIBYUV_DISABLE_NEON" \
     && make -C build -j"$(nproc)" install \
     && rm -rf /tmp/yuv
 
 # Rust with an ARMv6 host toolchain. Last of the build steps: Docker
 # re-checks the URL on each build, so a new rustup-init release only
-# re-runs this step. RUSTUP_USE_CURL: download with libcurl (rustup's
-# built-in client stalled on GitHub's runner); -v logs each download;
-# timeout fails instead of hanging.
+# re-runs this step. rustup's own downloader is used (its curl backend is
+# deprecated); -v logs each download, and a stalled attempt is killed
+# after RUSTUP_TIMEOUT (unpacking is slow under QEMU) and retried, up to 3 times.
+ARG RUSTUP_TIMEOUT=30m
 ADD --chmod=755 https://static.rust-lang.org/rustup/dist/arm-unknown-linux-gnueabihf/rustup-init /tmp/rustup-init
-RUN RUSTUP_USE_CURL=1 timeout 20m /tmp/rustup-init -y -v --profile minimal \
-        --default-host arm-unknown-linux-gnueabihf \
+RUN for i in 1 2 3; do \
+        timeout "$RUSTUP_TIMEOUT" /tmp/rustup-init -y -v --profile minimal \
+            --default-host arm-unknown-linux-gnueabihf && break; \
+        echo "rustup-init attempt $i failed or stalled"; \
+        [ "$i" = 3 ] && exit 1; sleep 5; \
+    done \
     && rm /tmp/rustup-init \
     && rustc --version && cargo --version
 
@@ -87,9 +102,16 @@ RUN RUSTUP_USE_CURL=1 timeout 20m /tmp/rustup-init -y -v --profile minimal \
 # falls back to pkg-config and links Raspbian's shared FFmpeg.
 # Thin LTO: rustc is a 32-bit program here (max 4 GB address space), and
 # One-KVM's default full LTO with one codegen unit may not fit.
+# --allow-multiple-definition: libjpeg.a (for libyuv) and libturbojpeg.a
+# both contain the libjpeg functions; upstream One-KVM links with it too.
 ENV ONE_KVM_LIBS_PATH=/usr/local \
     LIBYUV_STATIC=1 \
-    CARGO_PROFILE_RELEASE_LTO=thin
+    CARGO_PROFILE_RELEASE_LTO=thin \
+    RUSTFLAGS="-C link-arg=-Wl,--allow-multiple-definition"
+
+ARG SOURCE_URL=https://github.com/ruitaodong/One-KVM-armv6l
+LABEL org.opencontainers.image.source="${SOURCE_URL}" \
+      org.opencontainers.image.description="One-KVM ARMv6 build environment (Raspberry Pi OS armhf, gcc, Rust, libjpeg-turbo 3, libyuv)"
 
 WORKDIR /src
 CMD ["bash"]

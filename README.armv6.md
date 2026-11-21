@@ -64,9 +64,36 @@ from scratch with `docker rmi onekvm-armv6:trixie`. Keep or move it with
 
 ### GitHub Actions
 
-Actions → **Build ARMv6 (Pi Zero / Zero W)** → Run workflow, pick the suite and
-runner. The first step checks that the runner can run 32-bit ARM and stops
-with a clear error if not. Download the `one-kvm-armv6-<suite>` artifact.
+`.github/workflows/build-armv6.yml` runs `scripts/build-armv6.sh` and
+publishes the packages to a GitHub Release:
+
+- **Push a tag** (`git tag v0.2.9-armv6 && git push origin v0.2.9-armv6`):
+  builds trixie and bookworm and attaches `one-kvm_<version>_armhf-armv6-<suite>.deb`,
+  the bare binaries and `SHA256SUMS-armv6-<suite>` to the release for that tag.
+- **Actions → Build ARMv6 (Pi Zero / Zero W) → Run workflow**: pick the suite
+  and runner; fill in *release_tag* to publish, otherwise download the
+  `one-kvm-armv6-<suite>` artifact.
+
+Each run also pushes the build environment image to GHCR as
+`ghcr.io/ruitaodong/one-kvm-armv6-dev:<suite>` (plus `:<suite>-<commit>` and,
+for tags, `:<suite>-<tag>`). Locally you can reuse its layers instead of
+building the environment from scratch:
+
+```sh
+CACHE_FROM=ghcr.io/ruitaodong/one-kvm-armv6-dev:trixie ./scripts/build-armv6.sh
+# or use it directly
+docker run --rm -it --platform linux/arm/v6 -v "$PWD":/src ghcr.io/ruitaodong/one-kvm-armv6-dev:trixie
+```
+
+New GHCR packages are private; make it public under the package's settings
+if others should pull it.
+
+GitHub's `ubuntu-24.04-arm` runners can't run 32-bit ARM code, so the
+workflow detects that and runs the same container under QEMU. That is slow:
+the first build may take hours. Caches (build image, crates, `target/`) are
+saved even if the build step times out, so just re-run the workflow and it
+continues. A self-hosted Ampere A1 runner (below) builds natively in a
+fraction of the time.
 
 ### Oracle Cloud (Always Free Ampere A1)
 
