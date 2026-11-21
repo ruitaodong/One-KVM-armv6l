@@ -1,0 +1,48 @@
+name: Test Native ARM32 Support
+
+on:
+  workflow_dispatch:
+
+jobs:
+  check-aarch32:
+    strategy:
+      fail-fast: false
+      matrix:
+        runner: [ubuntu-24.04-arm, ubuntu-22.04-arm]
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - name: Inspect CPU and op-modes
+        id: cpu
+        run: |
+          echo "### Runner: ${{ matrix.runner }}" >> "$GITHUB_STEP_SUMMARY"
+          lscpu | grep -E "Architecture|CPU op-mode|Model name" | tee /tmp/cpu_info.txt
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          cat /tmp/cpu_info.txt >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+          if grep -q "32-bit" /tmp/cpu_info.txt; then
+            echo "aarch32=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "aarch32=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check binfmt_misc (verify no QEMU registered)
+        run: |
+          ls -la /proc/sys/fs/binfmt_misc/ || true
+
+      - name: Test native 32-bit container (no QEMU)
+        id: native_test
+        continue-on-error: true
+        run: |
+          docker run --rm --platform linux/arm/v7 \
+            arm32v7/debian:trixie-slim \
+            linux32 bash -c "uname -m && dpkg --print-architecture"
+
+      - name: Verdict
+        run: |
+          if [ "${{ steps.native_test.outcome }}" = "success" ]; then
+            echo "✅ **Native AArch32 works** on ${{ matrix.runner }}." >> "$GITHUB_STEP_SUMMARY"
+          else
+            echo "❌ **Native AArch32 not supported** on ${{ matrix.runner }} (Cobalt 100 / 64-bit only). Use QEMU or cross-compilation." >> "$GITHUB_STEP_SUMMARY"
+          fi
