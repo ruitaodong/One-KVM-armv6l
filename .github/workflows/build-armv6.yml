@@ -41,14 +41,15 @@ jobs:
       packages: write   # GHCR dev image
     env:
       IMAGE: onekvm-armv6:latest
-      CACHE: ${{ github.workspace }}/../armv6-cache
       # the release this run publishes to, if any
       TAG_NAME: ${{ inputs.release_tag || (startsWith(github.ref, 'refs/tags/') && github.ref_name || '') }}
     steps:
       - uses: actions/checkout@v4
 
-      - name: Set GHCR dev image name
+      - name: Set image name and cache dir
         run: |
+          # Cargo cache outside the checkout (actions/cache rejects "..")
+          echo "CACHE=${RUNNER_TEMP}/armv6-cache" >> "$GITHUB_ENV"
           DEV_IMAGE="ghcr.io/$(echo "${GITHUB_REPOSITORY_OWNER}" | tr '[:upper:]' '[:lower:]')/one-kvm-armv6-dev"
           echo "DEV_IMAGE=${DEV_IMAGE}" >> "$GITHUB_ENV"
           # layers are reused from the last pushed image (skipped if there is none)
@@ -61,12 +62,29 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
+      # Run the build's own base image and look at uname -m: on an arm64
+      # kernel a native 32-bit process reports "aarch64", while qemu-arm
+      # reports armv7l/armv8l. If the kernel can run AArch32 (setarch linux32
+      # works), disable any QEMU binfmt handler first: it would otherwise
+      # take over 32-bit binaries even though the CPU runs them natively.
       - name: Check for native 32-bit ARM, else enable QEMU
         id: arch
+        env:
+          BASE: tianon/raspbian:trixie-slim
         run: |
-          r=$(docker run --rm --platform linux/arm/v7 debian:trixie linux32 uname -m 2>&1 || true)
-          echo "32-bit ARM test: $r"
-          if [ "$r" = armv8l ]; then
+          lscpu | grep -i 'op-mode' || true
+          if [ "$(uname -m)" = aarch64 ] && setarch linux32 true 2>/dev/null; then
+            for f in /proc/sys/fs/binfmt_misc/qemu-arm /proc/sys/fs/binfmt_misc/qemu-armeb; do
+              if [ -e "$f" ]; then
+                echo "Disabling ${f##*/} binfmt handler"
+                echo 0 | sudo -n tee "$f" >/dev/null || true
+              fi
+            done
+          fi
+          docker pull -q --platform linux/arm/v6 "$BASE" >/dev/null
+          m=$(docker run --rm --platform linux/arm/v6 "$BASE" uname -m 2>/dev/null || true)
+          echo "uname -m in a linux/arm/v6 container: ${m:-<failed to run>}"
+          if [ "$m" = aarch64 ]; then
             echo "native=true" >> "$GITHUB_OUTPUT"
           else
             echo "::notice::This runner can't run 32-bit ARM natively; building under QEMU (slow)."

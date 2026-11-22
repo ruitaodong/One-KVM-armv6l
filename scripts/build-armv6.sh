@@ -5,7 +5,8 @@
 # arm64 host whose CPU executes 32-bit ARM code (GitHub's ubuntu-24.04-arm
 # runners, Oracle Cloud Ampere A1, a Pi 4/400 with a 64-bit OS) and builds
 # One-KVM there with its own native gcc and rustc, as on a Pi. Check the host:
-#   docker run --rm --platform linux/arm/v7 debian:trixie linux32 uname -m   -> armv8l
+#   docker run --rm --platform linux/arm/v6 tianon/raspbian:trixie-slim uname -m
+#   -> aarch64: native; armv7l/armv8l: QEMU; exec format error: neither
 # Other hosts (x86, Graviton 3+) work too once QEMU
 # binfmt for arm is registered, e.g.
 #   docker run --privileged --rm tonistiigi/binfmt --install arm

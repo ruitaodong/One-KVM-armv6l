@@ -19,11 +19,16 @@ It is trimmed for one job: **hardware H.264 from a CSI capture bridge**.
 
 **The build host** is Linux with Docker. Fastest is an arm64 machine whose CPU
 runs 32-bit ARM code (GitHub's `ubuntu-24.04-arm` runners, Oracle Cloud Ampere
-A1, a Pi 4/400 on a 64-bit OS); check (prints `armv8l`):
+A1, a Pi 4/400 on a 64-bit OS). Check:
 
 ```sh
-docker run --rm --platform linux/arm/v7 debian:trixie linux32 uname -m
+docker run --rm --platform linux/arm/v6 tianon/raspbian:trixie-slim uname -m
 ```
+
+`aarch64` means native (a 32-bit process on an arm64 kernel), `armv7l` or
+`armv8l` means QEMU, an `exec format error` means neither. If the CPU runs
+32-bit code (`setarch linux32 true` succeeds) but you get `armv7l`, a QEMU
+binfmt handler is intercepting it: `echo 0 | sudo tee /proc/sys/fs/binfmt_misc/qemu-arm`.
 
 Anything else (x86, Graviton 3+, Apple Silicon VMs) works under
 QEMU after `docker run --privileged --rm tonistiigi/binfmt --install arm`,
