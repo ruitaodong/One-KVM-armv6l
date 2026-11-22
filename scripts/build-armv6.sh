@@ -38,6 +38,15 @@ OWNER="$(id -u):$(id -g)"
 mkdir -p "$OUT_DIR" "$CACHE/registry" "$CACHE/git" "$CACHE/target"
 step() { printf '\n==> %s\n' "$*"; }
 
+# ARMv6 code issues memory barriers as CP15 instructions, which arm64
+# kernels emulate by default (abi.cp15_barrier=1), making rustc several
+# times slower; 2 lets the CPU execute them. Warn, don't change it.
+if [ "$(uname -m)" = aarch64 ] && [ -r /proc/sys/abi/cp15_barrier ] \
+   && [ "$(cat /proc/sys/abi/cp15_barrier)" != 2 ]; then
+    echo "WARNING: abi.cp15_barrier=$(cat /proc/sys/abi/cp15_barrier): ARMv6 barriers are emulated" \
+         "by the kernel and the build will be very slow. Fix: sudo sysctl -w abi.cp15_barrier=2" >&2
+fi
+
 # The build environment (Docker caches the layers). The image carries inline
 # cache metadata, so a pulled copy (CACHE_FROM) is reused as layer cache.
 toolchain_image() {

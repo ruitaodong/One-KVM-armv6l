@@ -32,6 +32,19 @@ With no emulator registered, only the CPU can have run it. (`uname -m` is no
 reliable hint: native 32-bit processes report `aarch64` or `armv8l`
 depending on their personality, and QEMU reports `armv7l` or `armv8l`.)
 
+**On an arm64 host, set `abi.cp15_barrier=2`.** ARMv6 has no `dmb`
+instruction, so ARMv6 code (glibc, gcc, rustc, ...) issues memory barriers as
+CP15 instructions, which arm64 kernels trap and emulate by default (`1`).
+rustc and LLVM use atomics constantly, so the build runs several times
+slower; `2` lets the CPU execute them directly. To keep it across reboots:
+
+```sh
+printf 'abi.cp15_barrier = 2\nabi.setend = 2\n' | sudo tee /etc/sysctl.d/99-armv6.conf
+sudo sysctl --system
+```
+
+`build-armv6.sh` warns when it isn't set; the GitHub workflow sets it.
+
 Anything else (x86, Graviton 3+, Apple Silicon VMs) works under
 QEMU after `docker run --privileged --rm tonistiigi/binfmt --install arm`,
 several times slower.

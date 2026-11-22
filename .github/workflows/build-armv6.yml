@@ -102,6 +102,23 @@ jobs:
             exit 1
           fi
 
+      # ARMv6 has no DMB/DSB/ISB; its code issues memory barriers as CP15
+      # writes, which ARMv8 kernels trap and emulate by default
+      # (abi.cp15_barrier=1). Every atomic in rustc, LLVM and cargo then
+      # costs a kernel round trip, slowing a native build several-fold.
+      # 2 = the CPU executes them itself. Kernel-wide, harmless.
+      - name: Let the CPU execute ARMv6 barriers (abi.cp15_barrier=2)
+        if: steps.arch.outputs.native == 'true'
+        run: |
+          for k in cp15_barrier setend; do
+            f=/proc/sys/abi/$k
+            [ -e "$f" ] || continue
+            echo "abi.$k was $(cat "$f")"
+            echo 2 | sudo -n tee "$f" >/dev/null \
+              || echo "::warning::Could not set abi.$k=2; ARMv6 code will run much slower"
+            echo "abi.$k is $(cat "$f")"
+          done
+
       - name: Set up QEMU (arm)
         if: steps.arch.outputs.native != 'true'
         uses: docker/setup-qemu-action@v3
