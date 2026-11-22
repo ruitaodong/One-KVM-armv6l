@@ -110,8 +110,12 @@ RUN for i in 1 2 3; do \
     && rm /tmp/rustup-init \
     && rustc --version && cargo --version
 
-# FFMPEG_STATIC + PKG_CONFIG_PATH: hwcodec links the minimal FFmpeg above
+# The C libraries built above are used as they are, so cargo doesn't compile
+# them again:
+# FFMPEG_STATIC + PKG_CONFIG_PATH: hwcodec links the minimal FFmpeg
 # statically (via pkg-config). ONE_KVM_LIBS_PATH: libyuv is found here.
+# TURBOJPEG_*: the turbojpeg crate links /usr/local/lib/libturbojpeg.a
+# instead of building its bundled libjpeg-turbo with cmake.
 # Thin LTO: rustc is a 32-bit program here (max 4 GB address space), and
 # One-KVM's default full LTO with one codegen unit may not fit.
 # --allow-multiple-definition: libjpeg.a (for libyuv) and libturbojpeg.a
@@ -120,6 +124,10 @@ ENV PKG_CONFIG_PATH=/opt/ffmpeg/lib/pkgconfig \
     FFMPEG_STATIC=1 \
     ONE_KVM_LIBS_PATH=/usr/local \
     LIBYUV_STATIC=1 \
+    TURBOJPEG_SOURCE=explicit \
+    TURBOJPEG_STATIC=1 \
+    TURBOJPEG_LIB_DIR=/usr/local/lib \
+    TURBOJPEG_INCLUDE_DIR=/usr/local/include \
     CARGO_PROFILE_RELEASE_LTO=thin \
     RUSTFLAGS="-C link-arg=-Wl,--allow-multiple-definition"
 

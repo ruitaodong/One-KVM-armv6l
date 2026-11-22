@@ -15,7 +15,8 @@ It is trimmed for one job: **hardware H.264 from a CSI capture bridge**.
   without color conversion (`ONE_KVM_PI_UYVY_DIRECT=0` disables this).
 - `Depends:` is computed with `dpkg-shlibdeps` from what the binary actually
   links (libc, libstdc++, ALSA, Opus, udev).
-- libjpeg-turbo 3 and libyuv are built from source and linked statically.
+- FFmpeg, libjpeg-turbo 3 and libyuv are compiled once, in the build
+  environment image, and linked statically; `cargo build` doesn't rebuild them.
 
 **The build host** is Linux with Docker. Fastest is an arm64 machine whose CPU
 runs 32-bit ARM code (GitHub's `ubuntu-24.04-arm` runners, Oracle Cloud Ampere

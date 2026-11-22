@@ -26,6 +26,7 @@ const CONFIG_SUPPORTED_FORMATS = new Set([
   'YUV420',
   'RGB24',
   'BGR24',
+  'UYVY',
 ])
 
 const WEBRTC_SUPPORTED_FORMATS = new Set([
@@ -65,6 +66,12 @@ export function getVideoFormatState(
       return 'supported'
     }
     return 'unsupported'
+  }
+
+  // UYVY (HDMI-CSI bridges such as the TC358743) is only taken by the
+  // Raspberry Pi's H.264 encoder, which gets it without conversion.
+  if (context === 'h264' && normalizedFormat === 'UYVY') {
+    return 'supported'
   }
 
   if (WEBRTC_SUPPORTED_FORMATS.has(normalizedFormat)) {
