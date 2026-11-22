@@ -12,6 +12,8 @@ categories = ["embedded", "network-programming"]
 [features]
 default = ["desktop"]
 rkmpp = ["hwcodec/rkmpp"]
+# Hardware H.264 only (Raspberry Pi Zero): no MJPEG stream mode
+h264-only = []
 desktop = [
     "dep:tokio",
     "dep:tokio-util",

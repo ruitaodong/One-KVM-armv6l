@@ -297,6 +297,9 @@ impl MjpegStreamHandler {
             PixelFormat::Yuyv => encoder
                 .encode_yuyv(frame.data(), sequence)
                 .map_err(|e| format!("YUYV encode failed: {}", e))?,
+            PixelFormat::Uyvy => encoder
+                .encode_uyvy(frame.data(), sequence)
+                .map_err(|e| format!("UYVY encode failed: {}", e))?,
             PixelFormat::Yvyu => encoder
                 .encode_yvyu(frame.data(), sequence)
                 .map_err(|e| format!("YVYU encode failed: {}", e))?,

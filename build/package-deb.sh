@@ -81,6 +81,17 @@ package_arch() {
         cp "$SCRIPT_DIR/one-kvm.service" "$PKG_DIR/lib/systemd/system/"
     fi
 
+    # PKG_OVERLAY: a directory tree copied into the package root (e.g. the
+    # ARMv6 build's EDID, helper and systemd drop-in). Its /etc files become
+    # conffiles, so local edits survive upgrades.
+    if [ -n "${PKG_OVERLAY:-}" ]; then
+        cp -a "$PKG_OVERLAY"/. "$PKG_DIR"/
+        chmod 755 "$PKG_DIR"   # cp -a copied the overlay root's mode (mktemp: 0700)
+        if [ -d "$PKG_OVERLAY/etc" ]; then
+            (cd "$PKG_OVERLAY" && find etc -type f | sed 's|^|/|' | sort) >> "$PKG_DIR/DEBIAN/conffiles"
+        fi
+    fi
+
     # Create postinst script (enable service on install)
     cat > "$PKG_DIR/DEBIAN/postinst" <<'EOF'
 #!/bin/bash
@@ -90,6 +101,7 @@ case "$1" in
     configure)
         # Enable and start service
         if [ -f /lib/systemd/system/one-kvm.service ]; then
+            systemctl daemon-reload || true
             systemctl enable one-kvm
             systemctl start one-kvm || true
         fi

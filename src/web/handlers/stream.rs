@@ -358,7 +358,7 @@ pub async fn stream_codecs_list() -> Json<AvailableCodecsResponse> {
         protocol: "http".to_string(),
         hardware: false,
         backend: Some("software".to_string()),
-        available: true,
+        available: !cfg!(feature = "h264-only"),
     });
 
     // Check H264 availability (supports software fallback)

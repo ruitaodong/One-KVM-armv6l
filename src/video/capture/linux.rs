@@ -250,6 +250,16 @@ impl CaptureStream {
                 requested_fourcc, fmt.pixelformat
             );
         } else {
+            if fmt.pixelformat != requested_fourcc {
+                // G_FMT returned the previous format's plane layout (e.g. RGB24's
+                // 3 bytes/pixel stride). Kept as is, the driver may accept it as
+                // padding and capture UYVY with a 1.5x stride. Zero lets the
+                // driver compute the layout for the new format.
+                for plane in fmt.plane_fmt.iter_mut() {
+                    plane.bytesperline = 0;
+                    plane.sizeimage = 0;
+                }
+            }
             fmt.pixelformat = requested_fourcc;
         }
 

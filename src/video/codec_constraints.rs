@@ -56,9 +56,13 @@ impl StreamCodecConstraints {
                 VideoCodecType::VP8,
                 VideoCodecType::VP9,
             ],
-            allow_mjpeg: true,
+            allow_mjpeg: !cfg!(feature = "h264-only"),
             locked_codec: None,
-            reason: "No codec lock active".to_string(),
+            reason: if cfg!(feature = "h264-only") {
+                "MJPEG is disabled in this build (h264-only)".to_string()
+            } else {
+                "No codec lock active".to_string()
+            },
         }
     }
 

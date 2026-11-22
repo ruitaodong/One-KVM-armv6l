@@ -139,7 +139,12 @@ impl RuntimeBuilder {
         stream_manager.set_config_store(config_store.clone()).await;
         connect_audio_recovery(&audio, &stream_manager).await;
 
-        let initial_mode = config.stream.mode.clone();
+        // h264-only: always start in WebRTC/H.264, even if MJPEG was saved
+        let initial_mode = if cfg!(feature = "h264-only") {
+            crate::config::StreamMode::WebRTC
+        } else {
+            config.stream.mode.clone()
+        };
         if let Err(error) = stream_manager.init_with_mode(initial_mode.clone()).await {
             tracing::warn!(
                 "Failed to initialize stream manager with mode {:?}: {}",

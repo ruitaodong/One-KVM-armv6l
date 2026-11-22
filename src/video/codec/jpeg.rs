@@ -151,6 +151,29 @@ impl JpegEncoder {
         self.encode_i420_to_jpeg(sequence)
     }
 
+    /// Encode UYVY (YUV422, e.g. from HDMI-CSI bridges like the TC358743) to JPEG.
+    /// Same as [`Self::encode_yuyv`] with the other byte order: a repack to I420,
+    /// no color conversion.
+    pub fn encode_uyvy(&mut self, data: &[u8], sequence: u64) -> Result<EncodedFrame> {
+        let width = self.config.resolution.width as usize;
+        let height = self.config.resolution.height as usize;
+        let expected_size = width * height * 2;
+
+        if data.len() < expected_size {
+            return Err(AppError::VideoError(format!(
+                "UYVY data too small: {} < {}",
+                data.len(),
+                expected_size
+            )));
+        }
+
+        self.ensure_i420_buffer();
+        libyuv::uyvy_to_i420(data, &mut self.i420_buffer, width as i32, height as i32)
+            .map_err(|e| AppError::VideoError(format!("libyuv UYVY→I420 failed: {}", e)))?;
+
+        self.encode_i420_to_jpeg(sequence)
+    }
+
     /// YVYU → swap chroma to YUYV in scratch, then same as [`Self::encode_yuyv`].
     pub fn encode_yvyu(&mut self, data: &[u8], sequence: u64) -> Result<EncodedFrame> {
         let width = self.config.resolution.width as usize;
@@ -366,6 +389,7 @@ impl crate::video::codec::traits::Encoder for JpegEncoder {
     fn encode(&mut self, data: &[u8], sequence: u64) -> Result<EncodedFrame> {
         match self.config.input_format {
             PixelFormat::Yuyv => self.encode_yuyv(data, sequence),
+            PixelFormat::Uyvy => self.encode_uyvy(data, sequence),
             PixelFormat::Yvyu => self.encode_yvyu(data, sequence),
             PixelFormat::Nv12 => self.encode_nv12(data, sequence),
             PixelFormat::Nv16 => self.encode_nv16(data, sequence),
@@ -387,6 +411,7 @@ impl crate::video::codec::traits::Encoder for JpegEncoder {
         matches!(
             format,
             PixelFormat::Yuyv
+                | PixelFormat::Uyvy
                 | PixelFormat::Yvyu
                 | PixelFormat::Nv12
                 | PixelFormat::Nv16
@@ -410,6 +435,7 @@ mod tests {
         assert!(encoder.uv_split_buffer.is_empty());
         assert!(encoder.bgra_buffer.is_empty());
         encoder.encode_yuyv(&vec![128; pixels * 2], 0).unwrap();
+        encoder.encode_uyvy(&vec![128; pixels * 2], 0).unwrap();
         encoder.encode_nv12(&vec![128; pixels * 3 / 2], 1).unwrap();
         encoder.encode_rgb(&vec![128; pixels * 3], 2).unwrap();
         encoder.encode_bgr(&vec![128; pixels * 3], 3).unwrap();

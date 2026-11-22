@@ -6,6 +6,7 @@ const MJPEG_MODE_SUPPORTED_FORMATS = new Set([
   'MJPEG',
   'JPEG',
   'YUYV',
+  'UYVY',
   'YVYU',
   'NV12',
   'NV16',

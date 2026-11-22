@@ -399,6 +399,10 @@ impl Streamer {
 
         *self.current_device.write().await = Some(device.clone());
         *self.state.write().await = StreamerState::Ready;
+        // Clear the "device busy" state published above. In MJPEG mode the
+        // capture loop reports Streaming soon after, but in WebRTC mode no
+        // loop runs here, so without this the UI stays on "Device busy".
+        self.publish_event(self.current_state_event().await).await;
 
         // Publish "config applied" event
         debug!(
