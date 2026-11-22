@@ -6,9 +6,10 @@ name: Build ARMv6 (Pi Zero / Zero W)
 # attaches the .deb to a GitHub Release.
 #
 # GitHub's ubuntu-24.04-arm runners (Azure Cobalt 100, Neoverse N2) run
-# 32-bit ARM code natively, so no QEMU is needed. If a runner can't, QEMU is
-# set up instead (much slower). The Cargo cache is saved even when the build
-# step times out, so re-running the workflow continues where it stopped.
+# 32-bit ARM code natively, so no QEMU is needed. On a runner that can't,
+# the job fails fast unless allow_qemu is set (a build under QEMU takes many
+# hours). The Cargo cache is saved even when the build step times out, so
+# re-running the workflow continues where it stopped.
 on:
   push:
     tags:
@@ -24,6 +25,10 @@ on:
         description: "Publish the .deb to this release tag (created if missing); empty = artifact only"
         type: string
         default: ""
+      allow_qemu:
+        description: "If the runner can't run 32-bit ARM natively, build under QEMU (many hours) instead of failing"
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -62,33 +67,39 @@ jobs:
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      # Run the build's own base image and look at uname -m: on an arm64
-      # kernel a native 32-bit process reports "aarch64", while qemu-arm
-      # reports armv7l/armv8l. If the kernel can run AArch32 (setarch linux32
-      # works), disable any QEMU binfmt handler first: it would otherwise
-      # take over 32-bit binaries even though the CPU runs them natively.
-      - name: Check for native 32-bit ARM, else enable QEMU
+      # Native check without guessing from uname -m (which reports aarch64,
+      # armv8l or armv7l depending on Docker's personality handling and the
+      # QEMU version): first make sure no QEMU handler for 32-bit ARM is
+      # registered, then run the build's base image. If it runs, nothing but
+      # the CPU can have run it. QEMU is opt-in (allow_qemu): a build under
+      # emulation takes many hours, so by default this fails fast instead.
+      - name: Check for native 32-bit ARM
         id: arch
         env:
           BASE: tianon/raspbian:trixie-slim
+          ALLOW_QEMU: ${{ inputs.allow_qemu || false }}
         run: |
           lscpu | grep -i 'op-mode' || true
-          if [ "$(uname -m)" = aarch64 ] && setarch linux32 true 2>/dev/null; then
-            for f in /proc/sys/fs/binfmt_misc/qemu-arm /proc/sys/fs/binfmt_misc/qemu-armeb; do
-              if [ -e "$f" ]; then
-                echo "Disabling ${f##*/} binfmt handler"
-                echo 0 | sudo -n tee "$f" >/dev/null || true
-              fi
-            done
+          for f in /proc/sys/fs/binfmt_misc/qemu-arm /proc/sys/fs/binfmt_misc/qemu-armeb; do
+            if [ -e "$f" ] && grep -qx enabled "$f"; then
+              echo "Disabling ${f##*/} binfmt handler"
+              echo 0 | sudo -n tee "$f" >/dev/null || true
+            fi
+          done
+          if grep -qsx enabled /proc/sys/fs/binfmt_misc/qemu-arm; then
+            echo "::error::A qemu-arm binfmt handler is registered and couldn't be disabled; can't tell native from emulated."
+            exit 1
           fi
           docker pull -q --platform linux/arm/v6 "$BASE" >/dev/null
-          m=$(docker run --rm --platform linux/arm/v6 "$BASE" uname -m 2>/dev/null || true)
-          echo "uname -m in a linux/arm/v6 container: ${m:-<failed to run>}"
-          if [ "$m" = aarch64 ]; then
+          if docker run --rm --platform linux/arm/v6 "$BASE" true; then
+            echo "32-bit ARM runs natively (no emulator registered)."
             echo "native=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "::notice::This runner can't run 32-bit ARM natively; building under QEMU (slow)."
+          elif [ "${ALLOW_QEMU}" = true ]; then
+            echo "::warning::This runner can't run 32-bit ARM natively; building under QEMU (many hours)."
             echo "native=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "::error::This runner can't run 32-bit ARM natively. Use a runner that can (ubuntu-24.04-arm, an OCI Ampere A1) or run the workflow with allow_qemu."
+            exit 1
           fi
 
       - name: Set up QEMU (arm)

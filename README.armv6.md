@@ -20,16 +20,17 @@ It is trimmed for one job: **hardware H.264 from a CSI capture bridge**.
 
 **The build host** is Linux with Docker. Fastest is an arm64 machine whose CPU
 runs 32-bit ARM code (GitHub's `ubuntu-24.04-arm` runners, Oracle Cloud Ampere
-A1, a Pi 4/400 on a 64-bit OS). Check:
+A1, a Pi 4/400 on a 64-bit OS). Check, with no QEMU handler for 32-bit ARM
+registered (`cat /proc/sys/fs/binfmt_misc/qemu-arm` says "No such file" or
+`disabled`; disable one with `echo 0 | sudo tee /proc/sys/fs/binfmt_misc/qemu-arm`):
 
 ```sh
-docker run --rm --platform linux/arm/v6 tianon/raspbian:trixie-slim uname -m
+docker run --rm --platform linux/arm/v6 tianon/raspbian:trixie-slim true && echo native
 ```
 
-`aarch64` means native (a 32-bit process on an arm64 kernel), `armv7l` or
-`armv8l` means QEMU, an `exec format error` means neither. If the CPU runs
-32-bit code (`setarch linux32 true` succeeds) but you get `armv7l`, a QEMU
-binfmt handler is intercepting it: `echo 0 | sudo tee /proc/sys/fs/binfmt_misc/qemu-arm`.
+With no emulator registered, only the CPU can have run it. (`uname -m` is no
+reliable hint: native 32-bit processes report `aarch64` or `armv8l`
+depending on their personality, and QEMU reports `armv7l` or `armv8l`.)
 
 Anything else (x86, Graviton 3+, Apple Silicon VMs) works under
 QEMU after `docker run --privileged --rm tonistiigi/binfmt --install arm`,
@@ -97,7 +98,8 @@ if others should pull it.
 
 GitHub's `ubuntu-24.04-arm` runners (Neoverse N2) run 32-bit ARM code
 natively, so the container needs no QEMU there. The workflow checks this
-first and falls back to QEMU (much slower) on a runner that can't. The Cargo
+first; on a runner that can't, it fails unless you run it with `allow_qemu`
+(a build under QEMU takes many hours). The Cargo
 cache is saved even if the build step times out, so a re-run continues.
 
 ### Oracle Cloud (Always Free Ampere A1)
