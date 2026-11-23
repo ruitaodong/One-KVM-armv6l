@@ -113,12 +113,10 @@ build)
         DEPENDS=$(cd "$D" && dpkg-shlibdeps -O "/src/$BIN" | sed -n "s/^shlibs:Depends=//p")
         echo "Depends: $DEPENDS"
 
-        # Extra files: the TC358743 EDID, the helper that loads it and the
-        # systemd drop-in running the helper; v4l-utils provides v4l2-ctl.
+        # The TC358743 EDID, loaded by one-kvm.service (ExecStartPre);
+        # v4l-utils provides v4l2-ctl.
         OV=$(mktemp -d)
         install -D -m 644 etc/tc358743-edid-1080p50.hex "$OV/etc/one-kvm/tc358743-edid-1080p50.hex"
-        install -D -m 755 build/armv6/tc358743-init "$OV/usr/libexec/one-kvm/tc358743-init"
-        install -D -m 644 build/armv6/tc358743.conf "$OV/lib/systemd/system/one-kvm.service.d/tc358743.conf"
 
         OUTPUT_DIR=/out DEPENDS="$DEPENDS, v4l-utils" DEB_NAME_SUFFIX=-armv6 PKG_OVERLAY="$OV" \
             bash build/package-deb.sh $T

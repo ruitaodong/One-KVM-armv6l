@@ -9,6 +9,9 @@ Type=simple
 User=root
 # Example for older Intel GPUs:
 # Environment=LIBVA_DRIVER_NAME=i965
+# TC358743 HDMI-to-CSI bridge (Raspberry Pi): load the EDID ("-": a failure,
+# e.g. no bridge or no EDID file, doesn't stop One-KVM)
+ExecStartPre=-/usr/bin/v4l2-ctl -d /dev/video0 --set-edid=file=/etc/one-kvm/tc358743-edid-1080p50.hex
 ExecStart=/usr/bin/one-kvm
 Restart=on-failure
 RestartSec=5

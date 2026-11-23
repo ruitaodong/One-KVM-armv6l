@@ -143,14 +143,13 @@ ldd /usr/bin/one-kvm | grep 'not found'      # prints nothing
 ```
 
 **TC358743 HDMI-to-CSI bridge** (`dtoverlay=tc358743` in `config.txt`): the
-package installs `/etc/one-kvm/tc358743-edid-1080p50.hex` and runs
-`/usr/libexec/one-kvm/tc358743-init` before One-KVM starts (systemd drop-in
-`one-kvm.service.d/tc358743.conf`). It loads the EDID unless it is already
-active (each load re-plugs the HDMI link) and, if a source is already
-sending, commits its timings and selects UYVY. HDMI need not be connected at
-startup: nothing waits for it. Use another EDID with
-`Environment=TC358743_EDID=/path/file.hex` in a drop-in of your own; without
-a unicam device the helper does nothing. Its output: `journalctl -u one-kvm`.
+package installs `/etc/one-kvm/tc358743-edid-1080p50.hex`, and
+`one-kvm.service` loads it into `/dev/video0` before One-KVM starts
+(`ExecStartPre`, `v4l2-ctl --set-edid`). Each load re-plugs the HDMI link, so
+the host sees the monitor reconnect when the service restarts. HDMI need not
+be connected at startup: One-KVM treats unicam with a TC358743 as an HDMI
+input that follows the source, detecting and applying its timings whenever
+it connects or changes mode, and waiting while there is no signal.
 
 USB OTG: `dtoverlay=dwc2,dr_mode=peripheral` in `config.txt` and no other USB
 gadget (`g_serial`, `g_ether`, ...) loaded. The Zero has one OTG port, and

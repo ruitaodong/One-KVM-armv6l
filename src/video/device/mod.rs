@@ -105,8 +105,15 @@ pub(crate) fn is_rkcif_driver(driver: &str) -> bool {
     driver.to_ascii_lowercase().starts_with("rkcif")
 }
 
+/// Raspberry Pi CSI-2 receiver. Behind it can be an HDMI bridge (TC358743,
+/// with DV timings) or a camera sensor (without); callers that can query
+/// the device demote the latter to `Configurable`.
+pub(crate) fn is_unicam_driver(driver: &str) -> bool {
+    driver.eq_ignore_ascii_case("unicam")
+}
+
 pub fn control_mode(driver: &str, card: &str) -> VideoControlMode {
-    if is_rkcif_driver(driver) || is_rk_hdmirx_driver(driver, card) {
+    if is_rkcif_driver(driver) || is_rk_hdmirx_driver(driver, card) || is_unicam_driver(driver) {
         VideoControlMode::SourceFollowing
     } else {
         VideoControlMode::Configurable
@@ -223,6 +230,10 @@ mod tests {
         );
         assert_eq!(
             control_mode("rk_hdmirx", "capture"),
+            VideoControlMode::SourceFollowing
+        );
+        assert_eq!(
+            control_mode("unicam", "unicam"),
             VideoControlMode::SourceFollowing
         );
         assert_eq!(

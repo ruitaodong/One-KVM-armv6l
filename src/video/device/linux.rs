@@ -18,7 +18,8 @@ use v4l2r::{Format as V4l2rFormat, QueueType};
 
 use super::bridge as csi_bridge;
 use super::{
-    control_mode, is_rk_hdmirx_driver, is_rkcif_driver, VideoControlMode, VideoInputStatus,
+    control_mode, is_rk_hdmirx_driver, is_rkcif_driver, is_unicam_driver, VideoControlMode,
+    VideoInputStatus,
 };
 use crate::error::{AppError, Result};
 use crate::video::format::{PixelFormat, Resolution};
@@ -194,7 +195,21 @@ impl VideoDevice {
     }
 
     fn probe_live_input(&self, caps: &V4l2rCapability) -> LiveInputProbe {
-        let control_mode = control_mode(&caps.driver, &caps.card);
+        let mut control_mode = control_mode(&caps.driver, &caps.card);
+        // unicam with a camera sensor has no DV timings: an ordinary camera.
+        // With an HDMI bridge (TC358743) it follows the source: timings are
+        // probed and committed on open, re-probed on SOURCE_CHANGE, and
+        // capture waits while there is no signal.
+        if control_mode == VideoControlMode::SourceFollowing
+            && is_unicam_driver(&caps.driver)
+            && matches!(
+                ioctl::query_dv_timings::<v4l2_dv_timings>(&self.fd),
+                Err(ioctl::QueryDvTimingsError::Unsupported
+                    | ioctl::QueryDvTimingsError::IoctlError(Errno::ENOTTY))
+            )
+        {
+            control_mode = VideoControlMode::Configurable;
+        }
         if control_mode == VideoControlMode::Configurable {
             let input_status = self
                 .get_format()
@@ -306,7 +321,11 @@ impl VideoDevice {
         let has_signal = live.has_signal;
 
         let native_hdmirx = is_rk_hdmirx_driver(&caps.driver, &caps.card);
-        let mut formats = if native_hdmirx || is_rkcif_driver(&caps.driver) {
+        let mut formats = if native_hdmirx
+            || is_rkcif_driver(&caps.driver)
+            || (is_unicam_driver(&caps.driver)
+                && live.control_mode == VideoControlMode::SourceFollowing)
+        {
             // CSI/HDMI bridge drivers (rk_hdmirx, rkcif) expose multiple pixel
             // formats via ENUM_FMT (e.g. rk_hdmirx: BGR3/NV24/NV16/NV12) but
             // `ENUM_FRAMESIZES` is fiction for these drivers (rkcif reports a
